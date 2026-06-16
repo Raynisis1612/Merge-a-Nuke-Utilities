@@ -1,5 +1,5 @@
 -- ============================================================
---  Merge a Nuke Utilities  v1.3.0
+--  Merge a Nuke Utilities  v1.3.1
 --  Author: Claude
 --  Game: Merge a Nuke (Place ID: 128784467030899)
 -- ============================================================
@@ -905,7 +905,7 @@ end)
 local Window = WindUI:CreateWindow({
     Title       = "Merge a Nuke Utilities",
     Icon        = "solar:atom-bold",
-    Author      = "by Claude  •  v1.3.0",
+    Author      = "by Claude  •  v1.3.1",
     Folder      = "MergeANukeUtils",
     NewElements = true,
     Topbar      = { Height = 44, ButtonsType = "Mac" },
@@ -919,7 +919,24 @@ local Window = WindUI:CreateWindow({
     },
 })
 
-Window:Tag({ Title = "v1.3.0", Icon = "zap", Color = Color3.fromHex("#1a1a2e"), Border = true })
+Window:Tag({ Title = "v1.3.1", Icon = "zap", Color = Color3.fromHex("#1a1a2e"), Border = true })
+
+-- ──────────────────────────────────────────────────────────────
+-- Auto-save helper
+-- Debounced: waits 1.5 s after the last change before writing.
+-- Called inside every toggle/slider callback so "default" always
+-- reflects the current session state before a rejoin fires.
+-- ──────────────────────────────────────────────────────────────
+local _autoSaveThread = nil
+local function scheduleAutoSave()
+    if _autoSaveThread then task.cancel(_autoSaveThread) end
+    _autoSaveThread = task.delay(1.5, function()
+        _autoSaveThread = nil
+        pcall(function()
+            Window.ConfigManager:Config("default"):Save()
+        end)
+    end)
+end
 
 -- ── MAIN SECTION ─────────────────────────────────────────────
 local MainSection = Window:Section({ Title = "Main" })
@@ -937,6 +954,7 @@ do
         Desc  = "Auto-merges nuke pairs.",
         Value = false, Flag = "autoMerge",
         Callback = function(state)
+            scheduleAutoSave()
             if state then
                 if not R_PickUp or not R_MergeRequest or not R_HoldStarted then
                     WindUI:Notify({ Title = "Error", Content = "Remotes not found. Make sure you're in game.", Icon = "alert-circle", Duration = 4 })
@@ -956,7 +974,7 @@ do
         Desc  = "Delay between merge cycles.",
         Value = { Min = 0.2, Max = 3.0, Default = 0.2 }, Step = 0.1,
         IsTooltip = true, Flag = "mergeDelay",
-        Callback = function(v) State.autoMergeDelay = v end,
+        Callback = function(v) State.autoMergeDelay = v; scheduleAutoSave() end,
     })
     MergeTab:Space()
 
@@ -1012,6 +1030,7 @@ do
         Desc  = "Keeps your island locked automatically.",
         Value = false, Flag = "autoLock",
         Callback = function(state)
+            scheduleAutoSave()
             if state then
                 if not R_RequestLock then
                     WindUI:Notify({ Title = "Error", Content = "RequestLockBase remote not found.", Icon = "alert-circle", Duration = 4 })
@@ -1069,6 +1088,7 @@ do
         Title = "Spawn Tier", Desc = "Auto-buys Spawn Tier upgrades.",
         Value = false, Flag = "autoUpg_TIER",
         Callback = function(state)
+            scheduleAutoSave()
             if state then startAutoUpgrade("TIER") else stopAutoUpgrade("TIER") end
         end,
     })
@@ -1078,6 +1098,7 @@ do
         Title = "Max Spawns", Desc = "Auto-buys Max Spawns upgrades.",
         Value = false, Flag = "autoUpg_MAX",
         Callback = function(state)
+            scheduleAutoSave()
             if state then startAutoUpgrade("MAX") else stopAutoUpgrade("MAX") end
         end,
     })
@@ -1087,6 +1108,7 @@ do
         Title = "Lock Cooldown", Desc = "Auto-buys Lock Cooldown upgrades.",
         Value = false, Flag = "autoUpg_LOCKBASE",
         Callback = function(state)
+            scheduleAutoSave()
             if state then startAutoUpgrade("LOCKBASE") else stopAutoUpgrade("LOCKBASE") end
         end,
     })
@@ -1105,6 +1127,7 @@ do
         Desc  = "Leaves and rejoins when an enemy nuke enters your detection radius while unlocked.",
         Value = false, Flag = "autoLeave",
         Callback = function(state)
+            scheduleAutoSave()
             if state then
                 startAutoLeave()
                 WindUI:Notify({ Title = "Anti Nuke", Content = "Active. Watching for incoming nukes.", Duration = 3 })
@@ -1123,7 +1146,7 @@ do
         Value = { Min = 0.1, Max = 5, Default = 0.1 }, Step = 0.1,
         IsTooltip = true, IsTextbox = true, Flag = "rejoinDelay",
         Callback = function(v)
-            State.rejoinDelay = v
+            State.rejoinDelay = v; scheduleAutoSave()
         end,
     })
 
@@ -1135,7 +1158,7 @@ do
         Value = { Min = 10, Max = 200, Default = 125 }, Step = 1,
         IsTooltip = true, IsTextbox = true, Flag = "detectionRadius",
         Callback = function(v)
-            State.detectionRadius = v
+            State.detectionRadius = v; scheduleAutoSave()
         end,
     })
 end
@@ -1154,6 +1177,7 @@ do
         Desc  = "Rejoins and re-executes the script on a timer to prevent lag.",
         Value = false, Flag = "autoRejoin",
         Callback = function(state)
+            scheduleAutoSave()
             if state then
                 startAutoRejoin()
                 WindUI:Notify({ Title = "Auto Rejoin", Content = "Periodic rejoin active (" .. State.autoRejoinMinutes .. " min).", Duration = 3 })
@@ -1172,7 +1196,7 @@ do
         Value = { Min = 5, Max = 60, Default = 20 }, Step = 1,
         IsTooltip = true, IsTextbox = true, Flag = "rejoinInterval",
         Callback = function(v)
-            State.autoRejoinMinutes = v
+            State.autoRejoinMinutes = v; scheduleAutoSave()
         end,
     })
 end
@@ -1191,6 +1215,7 @@ do
         Desc  = "Prevents AFK kicks by simulating input every 20 seconds.",
         Value = false, Flag = "antiAfk",
         Callback = function(state)
+            scheduleAutoSave()
             if state then
                 startAntiAfk()
                 WindUI:Notify({ Title = "Anti-AFK", Content = "Active. AFK kick prevention enabled.", Duration = 3 })
@@ -1217,6 +1242,7 @@ do
         Callback = function(v)
             State.walkSpeed = v
             local hum = getHumanoid(); if hum then hum.WalkSpeed = v end
+            scheduleAutoSave()
         end,
     })
     moveSec:Space()
@@ -1226,6 +1252,7 @@ do
         Callback = function(v)
             State.jumpPower = v
             local hum = getHumanoid(); if hum then hum.JumpPower = v end
+            scheduleAutoSave()
         end,
     })
     moveSec:Space()
@@ -1308,7 +1335,7 @@ do
     uiSec:Slider({
         Title = "UI Scale", Value = { Min = 0.5, Max = 1.5, Default = 1.0 }, Step = 0.05,
         IsTooltip = true, Flag = "uiScale",
-        Callback = function(v) Window:SetUIScale(v) end,
+        Callback = function(v) Window:SetUIScale(v); scheduleAutoSave() end,
     })
     SettingsTab:Space()
 
@@ -1439,35 +1466,92 @@ end
 -- ──────────────────────────────────────────────────────────────
 task.wait(1)
 WindUI:Notify({
-    Title   = "Merge a Nuke  v1.3.0",
-    Content = "Loaded! v1.3.0 — Auto-load config, autolock fix, Anti Nuke tab, reworked Anti-AFK, detection radius → 125.",
+    Title   = "Merge a Nuke  v1.3.1",
+    Content = "Loaded! v1.3.1 — Auto-load config, autolock fix, Anti Nuke tab, reworked Anti-AFK, detection radius → 125.",
     Icon    = "solar:atom-bold",
     Duration = 6,
 })
 
 -- ──────────────────────────────────────────────────────────────
--- Auto-load "default" config on every script start (covers the
--- rejoin case: queue_on_teleport re-executes this script and all
--- previous toggle states are restored automatically).
+-- Auto-load "default" config on every script start.
+--
+-- WHY THE MANUAL SYNC IS NEEDED:
+-- WindUI's cfg:Load() calls :Set() on each element to restore its
+-- visual / stored value, but intentionally does NOT fire the
+-- element's Callback.  This means toggles appear ON but nothing
+-- actually starts (autoMerge loop, autoLock loop, etc.) and
+-- slider values are never written back into State.xxx.
+-- We fix this by reading WindUI.Flags after Load() and explicitly
+-- starting every feature whose flag came back true, and applying
+-- every slider value into State.
 -- ──────────────────────────────────────────────────────────────
 task.spawn(function()
-    task.wait(0.5)  -- let WindUI finish initialising flags
+    task.wait(1.5)  -- ensure WindUI has registered all element flags
+
     local ConfigManager = Window.ConfigManager
-    local allConfigs = ConfigManager:AllConfigs()
-    for _, name in ipairs(allConfigs) do
-        if name == "default" then
-            local ok, err = pcall(function() ConfigManager:Config("default"):Load() end)
-            if ok then
-                WindUI:Notify({
-                    Title    = "Config",
-                    Content  = 'Auto-loaded "default" config.',
-                    Icon     = "folder-open",
-                    Duration = 3,
-                })
-            else
-                warn("[Config] Auto-load failed:", err)
-            end
-            break
+
+    -- Attempt load; silently skip if "default" config doesn't exist yet
+    pcall(function() ConfigManager:Config("default"):Load() end)
+    task.wait(0.3)  -- let WindUI finish calling :Set() on every element
+
+    local F = WindUI.Flags
+    if not F then
+        warn("[Config] WindUI.Flags not available — cannot restore state.")
+        return
+    end
+
+    local function flagOn(name)
+        return F[name] and F[name].Value == true
+    end
+    local function flagVal(name)
+        return F[name] and F[name].Value
+    end
+
+    -- ── Restore slider-driven State values ───────────────────
+    local v
+    v = flagVal("mergeDelay");      if v then State.autoMergeDelay  = v end
+    v = flagVal("rejoinDelay");     if v then State.rejoinDelay      = v end
+    v = flagVal("detectionRadius"); if v then State.detectionRadius  = v end
+    v = flagVal("rejoinInterval");  if v then State.autoRejoinMinutes = v end
+    v = flagVal("walkSpeed")
+    if v then
+        State.walkSpeed = v
+        local hum = getHumanoid(); if hum then hum.WalkSpeed = v end
+    end
+    v = flagVal("jumpPower")
+    if v then
+        State.jumpPower = v
+        local hum = getHumanoid(); if hum then hum.JumpPower = v end
+    end
+
+    -- ── Boot features whose toggle was ON ────────────────────
+    if flagOn("autoMerge") then
+        if R_PickUp and R_MergeRequest and R_HoldStarted then
+            startAutoMerge()
         end
     end
+
+    if flagOn("autoLock") then
+        if R_RequestLock then startAutoLock() end
+    end
+
+    if flagOn("autoLeave")  then startAutoLeave()  end
+    if flagOn("autoRejoin") then startAutoRejoin() end
+    if flagOn("antiAfk")    then startAntiAfk()    end
+
+    if flagOn("autoUpg_TIER")     then startAutoUpgrade("TIER")     end
+    if flagOn("autoUpg_MAX")      then startAutoUpgrade("MAX")       end
+    if flagOn("autoUpg_LOCKBASE") then startAutoUpgrade("LOCKBASE")  end
+
+    -- UI-only flags (no feature to start, but apply them)
+    v = flagVal("uiScale"); if v then pcall(function() Window:SetUIScale(v) end) end
+    v = flagVal("toggleKey")
+    if v then pcall(function() Window:SetToggleKey(Enum.KeyCode[v]) end) end
+
+    WindUI:Notify({
+        Title    = "Config",
+        Content  = 'Restored settings from "default" config.',
+        Icon     = "folder-open",
+        Duration = 3,
+    })
 end)

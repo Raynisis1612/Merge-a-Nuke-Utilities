@@ -645,7 +645,7 @@ local LEAVE_DETECT_RADIUS = 75   -- studs from island center
 local REJOIN_DELAY        = 1.5    -- seconds to wait before rejoining (lets nuke clear)
 -- Set SCRIPT_URL to your raw script URL (e.g. a Pastebin raw link) to auto re-execute after rejoin.
 -- Leave as nil to skip auto re-execution.
-local SCRIPT_URL          = "https://raw.githubusercontent.com/Raynisis1612/Merge-a-Nuke-Utilities/refs/heads/main/.lua"
+local SCRIPT_URL          = "https://raw.githubusercontent.com/Raynisis1612/Merge-a-Nuke-Utilities/refs/heads/main/manu.lua"
 
 local function getMyIslandFloor()
     local bases = Workspace:FindFirstChild("Bases")
@@ -676,18 +676,27 @@ local function doRejoin()
             task.wait(1)
         end
 
-        -- Queue script re-execution using Potassium's queueonteleport API.
+        -- Queue script re-execution before the teleport fires.
         -- The queued code runs automatically once the teleport completes.
         if SCRIPT_URL and SCRIPT_URL ~= "" then
             local reexecCode = string.format(
                 'loadstring(game:HttpGet(%q))()',
                 SCRIPT_URL
             )
-            pcall(function()
-                -- queueonteleport / queue_on_teleport (Potassium alias both work)
-                local qot = (queueonteleport or queue_on_teleport)
-                qot(reexecCode)
-            end)
+
+            -- Resolve queueonteleport — check all common executor aliases
+            local qot = rawget(_G, "queueonteleport")
+                     or rawget(_G, "queue_on_teleport")
+                     or (syn and rawget(syn, "queue_on_teleport"))
+
+            if qot then
+                local ok, err = pcall(qot, reexecCode)
+                if not ok then
+                    warn("[AutoLeave] queueonteleport failed:", err)
+                end
+            else
+                warn("[AutoLeave] queueonteleport not available on this executor — script won't re-execute after rejoin.")
+            end
         end
 
         TeleportService:Teleport(game.PlaceId, LocalPlayer)

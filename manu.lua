@@ -1,5 +1,5 @@
 -- ============================================================
---  Merge a Nuke Utilities  v1.2.1
+--  Merge a Nuke Utilities  v1.2.2
 --  Author: Claude
 --  Game: Merge a Nuke (Place ID: 128784467030899)
 -- ============================================================
@@ -123,6 +123,11 @@ local State = {
 
     autoLeaveEnabled = false,
     autoLeaveThread  = nil,
+    rejoinDelay      = 0.5,   -- seconds before rejoining after nuke detected
+
+    autoRejoinEnabled = false,  -- periodic rejoin to prevent lag/perf issues
+    autoRejoinThread  = nil,
+    autoRejoinMinutes = 20,     -- minutes between periodic rejoins
 
     antiAfkEnabled   = false,
     antiAfkThread    = nil,
@@ -642,7 +647,7 @@ end
 -- ──────────────────────────────────────────────────────────────
 local LEAVE_SCAN_INTERVAL = 0.5
 local LEAVE_DETECT_RADIUS = 75   -- studs from island center
-local REJOIN_DELAY        = 0.75    -- seconds to wait before rejoining (lets nuke clear)
+-- REJOIN_DELAY is now dynamic: read from State.rejoinDelay (slider-controlled, default 0.5s)
 -- Set SCRIPT_URL to your raw script URL (e.g. a Pastebin raw link) to auto re-execute after rejoin.
 -- Leave as nil to skip auto re-execution.
 local SCRIPT_URL          = "https://raw.githubusercontent.com/Raynisis1612/Merge-a-Nuke-Utilities/refs/heads/main/manu.lua"
@@ -672,11 +677,12 @@ local queueteleport = queue_on_teleport
 print("[AutoLeave] queue_on_teleport resolved:", queueteleport ~= nil)
 
 local function doRejoin()
+    local rejoinDelay = State.rejoinDelay
     -- Countdown
-    for i = math.ceil(REJOIN_DELAY), 1, -1 do
+    for i = math.ceil(rejoinDelay), 1, -1 do
         pcall(function()
             WindUI:Notify({
-                Title    = "Auto Leave",
+                Title    = "Auto Rejoin",
                 Content  = "Rejoining in " .. i .. "s...",
                 Icon     = "clock",
                 Duration = 1.1,
@@ -730,7 +736,8 @@ local function autoLeaveLoop()
                             local dz = pos.Z - islandPos.Z
                             if math.sqrt(dx*dx + dz*dz) <= LEAVE_DETECT_RADIUS then
                                 State.autoLeaveEnabled = false
-                                WindUI:Notify({ Title = "Auto Leave", Content = "Incoming nuke! Rejoining in " .. REJOIN_DELAY .. "s...", Duration = REJOIN_DELAY + 1 })
+                                local rd = State.rejoinDelay
+                                WindUI:Notify({ Title = "Auto Rejoin", Content = "Incoming nuke! Rejoining in " .. rd .. "s...", Duration = rd + 1 })
                                 doRejoin()
                                 return
                             end
@@ -751,6 +758,45 @@ end
 local function stopAutoLeave()
     State.autoLeaveEnabled = false
     if State.autoLeaveThread then task.cancel(State.autoLeaveThread); State.autoLeaveThread = nil end
+end
+
+-- ──────────────────────────────────────────────────────────────
+-- Periodic Auto Rejoin
+-- Rejoins the game (and re-executes the script) after a set
+-- number of minutes to prevent lag / performance degradation.
+-- ──────────────────────────────────────────────────────────────
+local function autoRejoinLoop()
+    while State.autoRejoinEnabled do
+        local waitSeconds = State.autoRejoinMinutes * 60
+        -- Count down in 1-second ticks so the interval stays live
+        local elapsed = 0
+        while State.autoRejoinEnabled and elapsed < waitSeconds do
+            task.wait(1)
+            elapsed += 1
+        end
+        if not State.autoRejoinEnabled then break end
+
+        State.autoRejoinEnabled = false
+        WindUI:Notify({
+            Title    = "Auto Rejoin",
+            Content  = "Rejoining after " .. State.autoRejoinMinutes .. " min to refresh performance.",
+            Icon     = "refresh-cw",
+            Duration = 4,
+        })
+        task.wait(2)
+        doRejoin()
+    end
+end
+
+local function startAutoRejoin()
+    if State.autoRejoinThread then task.cancel(State.autoRejoinThread) end
+    State.autoRejoinEnabled = true
+    State.autoRejoinThread  = task.spawn(autoRejoinLoop)
+end
+
+local function stopAutoRejoin()
+    State.autoRejoinEnabled = false
+    if State.autoRejoinThread then task.cancel(State.autoRejoinThread); State.autoRejoinThread = nil end
 end
 
 -- ──────────────────────────────────────────────────────────────
@@ -819,7 +865,7 @@ end)
 local Window = WindUI:CreateWindow({
     Title       = "Merge a Nuke Utilities",
     Icon        = "solar:atom-bold",
-    Author      = "by Claude  •  v1.2.1",
+    Author      = "by Claude  •  v1.2.2",
     Folder      = "MergeANukeUtils",
     NewElements = true,
     Topbar      = { Height = 44, ButtonsType = "Mac" },
@@ -833,7 +879,7 @@ local Window = WindUI:CreateWindow({
     },
 })
 
-Window:Tag({ Title = "v1.2.1", Icon = "zap", Color = Color3.fromHex("#1a1a2e"), Border = true })
+Window:Tag({ Title = "v1.2.2", Icon = "zap", Color = Color3.fromHex("#1a1a2e"), Border = true })
 
 -- ── MAIN SECTION ─────────────────────────────────────────────
 local MainSection = Window:Section({ Title = "Main" })
@@ -1006,13 +1052,13 @@ do
     })
 end
 
--- ── Auto Leave Tab ──────────────────────────────────────────
+-- ── Auto Rejoin Tab ──────────────────────────────────────────
 local LeaveTab = MainSection:Tab({
-    Title = "Auto Leave", Icon = "log-out",
+    Title = "Auto Rejoin", Icon = "refresh-cw",
     IconColor = Color3.fromHex("#F87171"), Border = true,
 })
 do
-    local leaveSec = LeaveTab:Section({ Title = "Auto Leave", Box = true, BoxBorder = true, Opened = true })
+    local leaveSec = LeaveTab:Section({ Title = "Auto Rejoin", Box = true, BoxBorder = true, Opened = true })
 
     leaveSec:Toggle({
         Title = "Enable Auto Leave", Icon = "log-out",
@@ -1021,11 +1067,53 @@ do
         Callback = function(state)
             if state then
                 startAutoLeave()
-                WindUI:Notify({ Title = "Auto Leave", Content = "Active. Watching for incoming nukes.", Duration = 3 })
+                WindUI:Notify({ Title = "Auto Rejoin", Content = "Active. Watching for incoming nukes.", Duration = 3 })
             else
                 stopAutoLeave()
-                WindUI:Notify({ Title = "Auto Leave", Content = "Stopped.", Duration = 2 })
+                WindUI:Notify({ Title = "Auto Rejoin", Content = "Stopped.", Duration = 2 })
             end
+        end,
+    })
+
+    leaveSec:Space()
+
+    leaveSec:Slider({
+        Title = "Rejoin Delay",
+        Desc  = "How many seconds to wait before rejoining after a nuke is detected.",
+        Value = { Min = 0.1, Max = 5, Default = 0.5 }, Step = 0.1,
+        IsTooltip = true, IsTextbox = true, Flag = "rejoinDelay",
+        Callback = function(v)
+            State.rejoinDelay = v
+        end,
+    })
+
+    leaveSec:Space()
+
+    leaveSec:Toggle({
+        Title = "Auto Rejoin (Performance)",
+        Icon  = "refresh-cw",
+        Desc  = "Automatically rejoins and re-executes the script after a set time to prevent lag.",
+        Value = false, Flag = "autoRejoin",
+        Callback = function(state)
+            if state then
+                startAutoRejoin()
+                WindUI:Notify({ Title = "Auto Rejoin", Content = "Periodic rejoin active (" .. State.autoRejoinMinutes .. " min).", Duration = 3 })
+            else
+                stopAutoRejoin()
+                WindUI:Notify({ Title = "Auto Rejoin", Content = "Periodic rejoin stopped.", Duration = 2 })
+            end
+        end,
+    })
+
+    leaveSec:Space()
+
+    leaveSec:Slider({
+        Title = "Rejoin Interval (Minutes)",
+        Desc  = "How many minutes between automatic rejoins. Adjustable while running.",
+        Value = { Min = 5, Max = 60, Default = 20 }, Step = 1,
+        IsTooltip = true, IsTextbox = true, Flag = "rejoinInterval",
+        Callback = function(v)
+            State.autoRejoinMinutes = v
         end,
     })
 end
@@ -1173,6 +1261,7 @@ do
             stopAutoLock()
             stopAllAutoUpgrades()
             stopAutoLeave()
+            stopAutoRejoin()
             stopAntiAfk()
             if holdStartedConn then holdStartedConn:Disconnect() end
             if holdEndedConn   then holdEndedConn:Disconnect()   end
@@ -1186,8 +1275,8 @@ end
 -- ──────────────────────────────────────────────────────────────
 task.wait(1)
 WindUI:Notify({
-    Title   = "Merge a Nuke  v1.2.1",
-    Content = "Loaded! v1.2.1 — Anti-AFK, 75-stud leave, rejoin delay.",
+    Title   = "Merge a Nuke  v1.2.2",
+    Content = "Loaded! v1.2.2 — Auto Rejoin tab: delay slider, periodic rejoin.",
     Icon    = "solar:atom-bold",
     Duration = 5,
 })

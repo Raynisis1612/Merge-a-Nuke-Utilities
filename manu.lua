@@ -1,5 +1,5 @@
 -- ============================================================
---  Merge a Nuke Utilities  v1.2.2
+--  Merge a Nuke Utilities  v1.2.3
 --  Author: Claude
 --  Game: Merge a Nuke (Place ID: 128784467030899)
 -- ============================================================
@@ -114,16 +114,17 @@ end
 local State = {
     autoMergeEnabled = false,
     autoMergeThread  = nil,
-    autoMergeDelay   = 0.5,
+    autoMergeDelay   = 0.2,
     stats            = { merges = 0, drops = 0, errors = 0 },
     highestTier      = 0,
 
     autoLockEnabled  = false,
     autoLockThread   = nil,
 
-    autoLeaveEnabled = false,
-    autoLeaveThread  = nil,
-    rejoinDelay      = 0.5,   -- seconds before rejoining after nuke detected
+    autoLeaveEnabled  = false,
+    autoLeaveThread   = nil,
+    rejoinDelay       = 0.1,   -- seconds before rejoining after nuke detected
+    detectionRadius   = 90,    -- studs from island center to detect incoming nukes
 
     autoRejoinEnabled = false,  -- periodic rejoin to prevent lag/perf issues
     autoRejoinThread  = nil,
@@ -646,8 +647,8 @@ end
 -- If detected while our base is NOT locked, teleports us out.
 -- ──────────────────────────────────────────────────────────────
 local LEAVE_SCAN_INTERVAL = 0.5
-local LEAVE_DETECT_RADIUS = 75   -- studs from island center
--- REJOIN_DELAY is now dynamic: read from State.rejoinDelay (slider-controlled, default 0.5s)
+-- LEAVE_DETECT_RADIUS is now dynamic: read from State.detectionRadius (slider-controlled, default 90 studs)
+-- REJOIN_DELAY is now dynamic: read from State.rejoinDelay (slider-controlled, default 0.1s)
 -- Set SCRIPT_URL to your raw script URL (e.g. a Pastebin raw link) to auto re-execute after rejoin.
 -- Leave as nil to skip auto re-execution.
 local SCRIPT_URL          = "https://raw.githubusercontent.com/Raynisis1612/Merge-a-Nuke-Utilities/refs/heads/main/manu.lua"
@@ -734,7 +735,7 @@ local function autoLeaveLoop()
                         if pos then
                             local dx = pos.X - islandPos.X
                             local dz = pos.Z - islandPos.Z
-                            if math.sqrt(dx*dx + dz*dz) <= LEAVE_DETECT_RADIUS then
+                            if math.sqrt(dx*dx + dz*dz) <= State.detectionRadius then
                                 State.autoLeaveEnabled = false
                                 local rd = State.rejoinDelay
                                 WindUI:Notify({ Title = "Auto Rejoin", Content = "Incoming nuke! Rejoining in " .. rd .. "s...", Duration = rd + 1 })
@@ -865,7 +866,7 @@ end)
 local Window = WindUI:CreateWindow({
     Title       = "Merge a Nuke Utilities",
     Icon        = "solar:atom-bold",
-    Author      = "by Claude  •  v1.2.2",
+    Author      = "by Claude  •  v1.2.3",
     Folder      = "MergeANukeUtils",
     NewElements = true,
     Topbar      = { Height = 44, ButtonsType = "Mac" },
@@ -879,7 +880,7 @@ local Window = WindUI:CreateWindow({
     },
 })
 
-Window:Tag({ Title = "v1.2.2", Icon = "zap", Color = Color3.fromHex("#1a1a2e"), Border = true })
+Window:Tag({ Title = "v1.2.3", Icon = "zap", Color = Color3.fromHex("#1a1a2e"), Border = true })
 
 -- ── MAIN SECTION ─────────────────────────────────────────────
 local MainSection = Window:Section({ Title = "Main" })
@@ -914,7 +915,7 @@ do
     autoSec:Slider({
         Title = "Cycle Delay (s)",
         Desc  = "Delay between merge cycles.",
-        Value = { Min = 0.2, Max = 3.0, Default = 0.5 }, Step = 0.1,
+        Value = { Min = 0.2, Max = 3.0, Default = 0.2 }, Step = 0.1,
         IsTooltip = true, Flag = "mergeDelay",
         Callback = function(v) State.autoMergeDelay = v end,
     })
@@ -1062,7 +1063,7 @@ do
 
     leaveSec:Toggle({
         Title = "Enable Auto Leave", Icon = "log-out",
-        Desc  = "Rejoins the game when an enemy nuke enters 75 studs of your island while unlocked.",
+        Desc  = "Rejoins when an enemy nuke enters your detection radius while unlocked.",
         Value = false, Flag = "autoLeave",
         Callback = function(state)
             if state then
@@ -1079,8 +1080,8 @@ do
 
     leaveSec:Slider({
         Title = "Rejoin Delay",
-        Desc  = "How many seconds to wait before rejoining after a nuke is detected.",
-        Value = { Min = 0.1, Max = 5, Default = 0.5 }, Step = 0.1,
+        Desc  = "Seconds to wait before rejoining after a nuke is detected.",
+        Value = { Min = 0.1, Max = 5, Default = 0.1 }, Step = 0.1,
         IsTooltip = true, IsTextbox = true, Flag = "rejoinDelay",
         Callback = function(v)
             State.rejoinDelay = v
@@ -1089,10 +1090,22 @@ do
 
     leaveSec:Space()
 
+    leaveSec:Slider({
+        Title = "Detection Radius",
+        Desc  = "Studs from your island center to watch for incoming enemy nukes.",
+        Value = { Min = 10, Max = 200, Default = 90 }, Step = 1,
+        IsTooltip = true, IsTextbox = true, Flag = "detectionRadius",
+        Callback = function(v)
+            State.detectionRadius = v
+        end,
+    })
+
+    leaveSec:Space()
+
     leaveSec:Toggle({
         Title = "Auto Rejoin (Performance)",
         Icon  = "refresh-cw",
-        Desc  = "Automatically rejoins and re-executes the script after a set time to prevent lag.",
+        Desc  = "Rejoins and re-executes the script on a timer to prevent lag.",
         Value = false, Flag = "autoRejoin",
         Callback = function(state)
             if state then
@@ -1109,7 +1122,7 @@ do
 
     leaveSec:Slider({
         Title = "Rejoin Interval (Minutes)",
-        Desc  = "How many minutes between automatic rejoins. Adjustable while running.",
+        Desc  = "Minutes between periodic rejoins.",
         Value = { Min = 5, Max = 60, Default = 20 }, Step = 1,
         IsTooltip = true, IsTextbox = true, Flag = "rejoinInterval",
         Callback = function(v)
@@ -1129,7 +1142,7 @@ do
 
     afkSec:Toggle({
         Title = "Enable Anti-AFK", Icon = "activity",
-        Desc  = "Prevents Roblox from kicking you for inactivity by simulating input every 20 seconds.",
+        Desc  = "Prevents AFK kicks by simulating input every 20 seconds.",
         Value = false, Flag = "antiAfk",
         Callback = function(state)
             if state then
@@ -1252,6 +1265,107 @@ do
         Callback = function(v) Window:SetUIScale(v) end,
     })
     SettingsTab:Space()
+
+    -- ── Config System ──────────────────────────────────────────
+    local configSec = SettingsTab:Section({ Title = "Configs", Box = true, BoxBorder = true, Opened = true })
+
+    local ConfigManager = Window.ConfigManager
+
+    local configDropdown
+    configDropdown = configSec:Dropdown({
+        Title  = "Saved Configs",
+        Desc   = "Select a config to load or delete.",
+        Values = ConfigManager:AllConfigs(),
+        Value  = nil,
+        AllowNone = true,
+        Flag   = "configSelect",
+        Callback = function(_) end,
+    })
+
+    local configInput = configSec:Input({
+        Title       = "Config Name",
+        Desc        = "Name for saving a new config.",
+        Placeholder = "e.g. default",
+        Value       = "default",
+        Flag        = "configName",
+        Callback    = function(_) end,
+    })
+
+    configSec:Space()
+
+    local configStack = configSec:HStack({ AutoSpace = true })
+
+    configStack:Button({
+        Title   = "Save",
+        Icon    = "save",
+        Justify = "Center",
+        Color   = Color3.fromHex("#34D399"),
+        Callback = function()
+            local name = WindUI.Flags["configName"] and WindUI.Flags["configName"].Value or "default"
+            name = tostring(name):gsub("[^%w_%-]", "_")
+            if name == "" then name = "default" end
+            local cfg = ConfigManager:Config(name)
+            cfg:Save()
+            configDropdown:Refresh(ConfigManager:AllConfigs())
+            WindUI:Notify({ Title = "Config", Content = 'Saved "' .. name .. '".', Icon = "save", Duration = 3 })
+        end,
+    })
+
+    configStack:Button({
+        Title   = "Load",
+        Icon    = "folder-open",
+        Justify = "Center",
+        Color   = Color3.fromHex("#60A5FA"),
+        Callback = function()
+            local selected = WindUI.Flags["configSelect"] and WindUI.Flags["configSelect"].Value
+            if not selected or selected == "" then
+                WindUI:Notify({ Title = "Config", Content = "Select a config first.", Icon = "alert-circle", Duration = 3 })
+                return
+            end
+            local cfg = ConfigManager:Config(selected)
+            cfg:Load()
+            WindUI:Notify({ Title = "Config", Content = 'Loaded "' .. selected .. '".', Icon = "folder-open", Duration = 3 })
+        end,
+    })
+
+    configStack:Button({
+        Title   = "Delete",
+        Icon    = "trash-2",
+        Justify = "Center",
+        Color   = Color3.fromHex("#EF4444"),
+        Callback = function()
+            local selected = WindUI.Flags["configSelect"] and WindUI.Flags["configSelect"].Value
+            if not selected or selected == "" then
+                WindUI:Notify({ Title = "Config", Content = "Select a config first.", Icon = "alert-circle", Duration = 3 })
+                return
+            end
+            -- WindUI doesn't expose a delete API, so we remove the file via writefile/delfile if available
+            local path = "WindUI/MergeANukeUtils/configs/" .. selected .. ".json"
+            pcall(function()
+                if delfile then
+                    delfile(path)
+                elseif (syn and syn.io and syn.io.delete) then
+                    syn.io.delete(path)
+                end
+            end)
+            configDropdown:Refresh(ConfigManager:AllConfigs())
+            WindUI:Notify({ Title = "Config", Content = 'Deleted "' .. selected .. '".', Icon = "trash-2", Duration = 3 })
+        end,
+    })
+
+    configSec:Space()
+
+    configSec:Button({
+        Title    = "Refresh List",
+        Icon     = "refresh-cw",
+        Justify  = "Center",
+        Callback = function()
+            configDropdown:Refresh(ConfigManager:AllConfigs())
+            WindUI:Notify({ Title = "Config", Content = "Config list refreshed.", Duration = 2 })
+        end,
+    })
+
+    SettingsTab:Space()
     SettingsTab:Button({
         Title = "Destroy Hub", Icon = "trash-2", Justify = "Center",
         Color = Color3.fromHex("#EF4444"),
@@ -1275,8 +1389,8 @@ end
 -- ──────────────────────────────────────────────────────────────
 task.wait(1)
 WindUI:Notify({
-    Title   = "Merge a Nuke  v1.2.2",
-    Content = "Loaded! v1.2.2 — Auto Rejoin tab: delay slider, periodic rejoin.",
+    Title   = "Merge a Nuke  v1.2.3",
+    Content = "Loaded! v1.2.3 — Config system added, detection radius default → 90 studs.",
     Icon    = "solar:atom-bold",
     Duration = 5,
 })

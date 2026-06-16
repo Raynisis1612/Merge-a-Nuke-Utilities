@@ -663,42 +663,47 @@ local function getMyIslandFloor()
     return nil
 end
 
+-- Resolve queue_on_teleport once at load time, exactly like Infinite Yield does:
+-- direct variable access so executor-injected globals in getgenv() are found.
+local queueteleport = queue_on_teleport
+                   or (syn    and syn.queue_on_teleport)
+                   or (fluxus and fluxus.queue_on_teleport)
+
+print("[AutoLeave] queue_on_teleport resolved:", queueteleport ~= nil)
+
 local function doRejoin()
-    pcall(function()
-        -- Countdown so the user knows a rejoin is imminent
-        for i = REJOIN_DELAY, 1, -1 do
+    -- Countdown
+    for i = math.ceil(REJOIN_DELAY), 1, -1 do
+        pcall(function()
             WindUI:Notify({
                 Title    = "Auto Leave",
                 Content  = "Rejoining in " .. i .. "s...",
                 Icon     = "clock",
                 Duration = 1.1,
             })
-            task.wait(1)
-        end
+        end)
+        task.wait(1)
+    end
 
-        -- Queue script re-execution before the teleport fires.
-        -- The queued code runs automatically once the teleport completes.
-        if SCRIPT_URL and SCRIPT_URL ~= "" then
+    -- Queue script re-execution before the teleport fires
+    if SCRIPT_URL and SCRIPT_URL ~= "" then
+        if queueteleport then
             local reexecCode = string.format(
                 'loadstring(game:HttpGet(%q))()',
                 SCRIPT_URL
             )
-
-            -- Resolve queueonteleport — check all common executor aliases
-            local qot = rawget(_G, "queueonteleport")
-                     or rawget(_G, "queue_on_teleport")
-                     or (syn and rawget(syn, "queue_on_teleport"))
-
-            if qot then
-                local ok, err = pcall(qot, reexecCode)
-                if not ok then
-                    warn("[AutoLeave] queueonteleport failed:", err)
-                end
+            local ok, err = pcall(queueteleport, reexecCode)
+            if ok then
+                print("[AutoLeave] Queued re-execution of:", SCRIPT_URL)
             else
-                warn("[AutoLeave] queueonteleport not available on this executor — script won't re-execute after rejoin.")
+                warn("[AutoLeave] queueteleport call failed:", err)
             end
+        else
+            warn("[AutoLeave] queue_on_teleport not found — script won't re-execute after rejoin. Check your executor supports it.")
         end
+    end
 
+    pcall(function()
         TeleportService:Teleport(game.PlaceId, LocalPlayer)
     end)
 end

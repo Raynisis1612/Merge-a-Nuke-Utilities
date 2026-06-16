@@ -1,5 +1,5 @@
 -- ============================================================
---  Merge a Nuke Utilities  v1.2.0
+--  Merge a Nuke Utilities  v1.2.1
 --  Author: Claude
 --  Game: Merge a Nuke (Place ID: 128784467030899)
 -- ============================================================
@@ -642,7 +642,7 @@ end
 -- ──────────────────────────────────────────────────────────────
 local LEAVE_SCAN_INTERVAL = 0.5
 local LEAVE_DETECT_RADIUS = 75   -- studs from island center
-local REJOIN_DELAY        = 1.5    -- seconds to wait before rejoining (lets nuke clear)
+local REJOIN_DELAY        = 0.75    -- seconds to wait before rejoining (lets nuke clear)
 -- Set SCRIPT_URL to your raw script URL (e.g. a Pastebin raw link) to auto re-execute after rejoin.
 -- Leave as nil to skip auto re-execution.
 local SCRIPT_URL          = "https://raw.githubusercontent.com/Raynisis1612/Merge-a-Nuke-Utilities/refs/heads/main/manu.lua"
@@ -819,7 +819,7 @@ end)
 local Window = WindUI:CreateWindow({
     Title       = "Merge a Nuke Utilities",
     Icon        = "solar:atom-bold",
-    Author      = "by Claude  •  v1.1.0",
+    Author      = "by Claude  •  v1.2.1",
     Folder      = "MergeANukeUtils",
     NewElements = true,
     Topbar      = { Height = 44, ButtonsType = "Mac" },
@@ -833,7 +833,7 @@ local Window = WindUI:CreateWindow({
     },
 })
 
-Window:Tag({ Title = "v1.1.0", Icon = "zap", Color = Color3.fromHex("#1a1a2e"), Border = true })
+Window:Tag({ Title = "v1.2.1", Icon = "zap", Color = Color3.fromHex("#1a1a2e"), Border = true })
 
 -- ── MAIN SECTION ─────────────────────────────────────────────
 local MainSection = Window:Section({ Title = "Main" })
@@ -1186,8 +1186,8 @@ end
 -- ──────────────────────────────────────────────────────────────
 task.wait(1)
 WindUI:Notify({
-    Title   = "Merge a Nuke  v1.2.0",
-    Content = "Loaded! v1.2.0 — Anti-AFK, 75-stud leave, rejoin delay.",
+    Title   = "Merge a Nuke  v1.2.1",
+    Content = "Loaded! v1.2.1 — Anti-AFK, 75-stud leave, rejoin delay.",
     Icon    = "solar:atom-bold",
     Duration = 5,
 })

@@ -1,5 +1,5 @@
 -- ============================================================
---  Merge a Nuke Utilities  v1.2.4
+--  Merge a Nuke Utilities  v1.3.0
 --  Author: Claude
 --  Game: Merge a Nuke (Place ID: 128784467030899)
 -- ============================================================
@@ -124,7 +124,7 @@ local State = {
     autoLeaveEnabled  = false,
     autoLeaveThread   = nil,
     rejoinDelay       = 0.1,   -- seconds before rejoining after nuke detected
-    detectionRadius   = 90,    -- studs from island center to detect incoming nukes
+    detectionRadius   = 125,   -- studs from island center to detect incoming nukes
 
     autoRejoinEnabled = false,  -- periodic rejoin to prevent lag/perf issues
     autoRejoinThread  = nil,
@@ -576,20 +576,45 @@ end
 -- and not on cooldown), then waits until it's locked before looping.
 -- ──────────────────────────────────────────────────────────────
 local function autoLockLoop()
+    -- Track when we entered the current phase locally so that external phase
+    -- changes (e.g. lock cancelled by launching a nuke) are noticed even while
+    -- we are sleeping, rather than relying on a single fixed task.wait().
+    local phaseEnteredAt = tick()
+    local trackedPhase   = lockPhase
+
     while State.autoLockEnabled do
+        -- Detect server-pushed phase change and reset local timer
+        if lockPhase ~= trackedPhase then
+            trackedPhase   = lockPhase
+            phaseEnteredAt = tick()
+        end
+
         if lockPhase == "free" then
+            -- Immediately request a lock and wait up to 3 s for confirmation
             pcall(function() R_RequestLock:FireServer() end)
-            -- Wait up to 3s for the state to change
             local t = tick()
-            repeat task.wait(0.2) until lockPhase ~= "free" or (tick()-t) > 3
+            repeat task.wait(0.2) until lockPhase ~= "free" or (tick() - t) > 3
         elseif lockPhase == "locked" then
-            -- Already locked — wait until it expires (add 1s buffer)
-            local waitFor = math.max(1, lockSecondsLeft + 1)
-            task.wait(waitFor)
+            -- Poll every second; once our local elapsed time exceeds the
+            -- server-reported remaining time, poke the server for an update
+            -- (handles the case where the lock expired with no follow-up event).
+            task.wait(1)
+            local elapsed = tick() - phaseEnteredAt
+            if elapsed >= math.max(lockSecondsLeft, 1) + 1 then
+                pcall(function() R_RequestLock:FireServer() end)
+                task.wait(0.5)
+            end
         elseif lockPhase == "cooldown" then
-            -- On cooldown — wait it out
-            local waitFor = math.max(1, lockSecondsLeft + 0.5)
-            task.wait(waitFor)
+            -- Poll every second; once elapsed ≥ cooldown time, attempt to lock.
+            -- This handles nukes launched mid-lock that start an "unnatural"
+            -- 30-second cooldown — we no longer miss the free window after it.
+            task.wait(1)
+            local elapsed = tick() - phaseEnteredAt
+            if elapsed >= math.max(lockSecondsLeft, 1) + 0.5 then
+                pcall(function() R_RequestLock:FireServer() end)
+                local t = tick()
+                repeat task.wait(0.2) until lockPhase ~= "cooldown" or (tick() - t) > 3
+            end
         else
             task.wait(2)
         end
@@ -802,35 +827,49 @@ end
 
 -- ──────────────────────────────────────────────────────────────
 -- Anti-AFK
--- Prevents the Roblox AFK kick by simulating tiny character
--- movements every 20 seconds. Works by briefly jumping via
--- the VirtualUser service (same approach as Infinite Yield).
+-- Prevents the Roblox AFK kick by hooking the LocalPlayer.Idled
+-- event (fires ~20 min after last real input) and injecting a
+-- virtual right-click to reset the idle counter.  A 15-minute
+-- heartbeat loop provides a secondary fallback.
 -- ──────────────────────────────────────────────────────────────
-local VirtualUser = game:GetService("VirtualUser")
+local VirtualUser  = game:GetService("VirtualUser")
+local antiAfkConn  = nil   -- Idled event connection
 
-local function antiAfkLoop()
-    while State.antiAfkEnabled do
-        task.wait(20)
-        if State.antiAfkEnabled then
-            pcall(function()
-                LocalPlayer.Idled:connect(function() end) -- suppress idle signal
-                VirtualUser:Button2Down(Vector2.new(0, 0), CFrame.new())
-                task.wait(0.1)
-                VirtualUser:Button2Up(Vector2.new(0, 0), CFrame.new())
-            end)
-        end
-    end
+local function antiAfkInput()
+    pcall(function()
+        local cam = workspace.CurrentCamera
+        local cf  = cam and cam.CFrame or CFrame.new()
+        VirtualUser:Button2Down(Vector2.zero, cf)
+        task.wait(0.1)
+        VirtualUser:Button2Up(Vector2.zero, cf)
+    end)
 end
 
 local function startAntiAfk()
     if State.antiAfkThread then task.cancel(State.antiAfkThread) end
+    if antiAfkConn then antiAfkConn:Disconnect(); antiAfkConn = nil end
+
     State.antiAfkEnabled = true
-    State.antiAfkThread  = task.spawn(antiAfkLoop)
+
+    -- Primary: trigger whenever Roblox raises the idle signal
+    antiAfkConn = LocalPlayer.Idled:Connect(function()
+        if State.antiAfkEnabled then antiAfkInput() end
+    end)
+
+    -- Secondary: proactive input every 15 minutes so the idle
+    -- counter never reaches the 20-minute kick threshold
+    State.antiAfkThread = task.spawn(function()
+        while State.antiAfkEnabled do
+            task.wait(15 * 60)
+            if State.antiAfkEnabled then antiAfkInput() end
+        end
+    end)
 end
 
 local function stopAntiAfk()
     State.antiAfkEnabled = false
     if State.antiAfkThread then task.cancel(State.antiAfkThread); State.antiAfkThread = nil end
+    if antiAfkConn then antiAfkConn:Disconnect(); antiAfkConn = nil end
 end
 
 
@@ -866,7 +905,7 @@ end)
 local Window = WindUI:CreateWindow({
     Title       = "Merge a Nuke Utilities",
     Icon        = "solar:atom-bold",
-    Author      = "by Claude  •  v1.2.4",
+    Author      = "by Claude  •  v1.3.0",
     Folder      = "MergeANukeUtils",
     NewElements = true,
     Topbar      = { Height = 44, ButtonsType = "Mac" },
@@ -880,7 +919,7 @@ local Window = WindUI:CreateWindow({
     },
 })
 
-Window:Tag({ Title = "v1.2.4", Icon = "zap", Color = Color3.fromHex("#1a1a2e"), Border = true })
+Window:Tag({ Title = "v1.3.0", Icon = "zap", Color = Color3.fromHex("#1a1a2e"), Border = true })
 
 -- ── MAIN SECTION ─────────────────────────────────────────────
 local MainSection = Window:Section({ Title = "Main" })
@@ -1053,25 +1092,25 @@ do
     })
 end
 
--- ── Auto Rejoin Tab ──────────────────────────────────────────
+-- ── Anti Nuke Tab ────────────────────────────────────────────
 local LeaveTab = MainSection:Tab({
-    Title = "Auto Rejoin", Icon = "refresh-cw",
+    Title = "Anti Nuke", Icon = "shield-x",
     IconColor = Color3.fromHex("#F87171"), Border = true,
 })
 do
-    local leaveSec = LeaveTab:Section({ Title = "Auto Rejoin", Box = true, BoxBorder = true, Opened = true })
+    local leaveSec = LeaveTab:Section({ Title = "Anti Nuke", Box = true, BoxBorder = true, Opened = true })
 
     leaveSec:Toggle({
-        Title = "Enable Auto Leave", Icon = "log-out",
-        Desc  = "Rejoins when an enemy nuke enters your detection radius while unlocked.",
+        Title = "Enable Anti Nuke", Icon = "shield-x",
+        Desc  = "Leaves and rejoins when an enemy nuke enters your detection radius while unlocked.",
         Value = false, Flag = "autoLeave",
         Callback = function(state)
             if state then
                 startAutoLeave()
-                WindUI:Notify({ Title = "Auto Rejoin", Content = "Active. Watching for incoming nukes.", Duration = 3 })
+                WindUI:Notify({ Title = "Anti Nuke", Content = "Active. Watching for incoming nukes.", Duration = 3 })
             else
                 stopAutoLeave()
-                WindUI:Notify({ Title = "Auto Rejoin", Content = "Stopped.", Duration = 2 })
+                WindUI:Notify({ Title = "Anti Nuke", Content = "Stopped.", Duration = 2 })
             end
         end,
     })
@@ -1093,16 +1132,23 @@ do
     leaveSec:Slider({
         Title = "Detection Radius",
         Desc  = "Studs from your island center to watch for incoming enemy nukes.",
-        Value = { Min = 10, Max = 200, Default = 90 }, Step = 1,
+        Value = { Min = 10, Max = 200, Default = 125 }, Step = 1,
         IsTooltip = true, IsTextbox = true, Flag = "detectionRadius",
         Callback = function(v)
             State.detectionRadius = v
         end,
     })
+end
 
-    leaveSec:Space()
+-- ── Auto Rejoin Tab ──────────────────────────────────────────
+local RejoinTab = MainSection:Tab({
+    Title = "Auto Rejoin", Icon = "refresh-cw",
+    IconColor = Color3.fromHex("#A78BFA"), Border = true,
+})
+do
+    local rejoinSec = RejoinTab:Section({ Title = "Auto Rejoin", Box = true, BoxBorder = true, Opened = true })
 
-    leaveSec:Toggle({
+    rejoinSec:Toggle({
         Title = "Auto Rejoin (Performance)",
         Icon  = "refresh-cw",
         Desc  = "Rejoins and re-executes the script on a timer to prevent lag.",
@@ -1118,9 +1164,9 @@ do
         end,
     })
 
-    leaveSec:Space()
+    rejoinSec:Space()
 
-    leaveSec:Slider({
+    rejoinSec:Slider({
         Title = "Rejoin Interval (Minutes)",
         Desc  = "Minutes between periodic rejoins.",
         Value = { Min = 5, Max = 60, Default = 20 }, Step = 1,
@@ -1393,8 +1439,35 @@ end
 -- ──────────────────────────────────────────────────────────────
 task.wait(1)
 WindUI:Notify({
-    Title   = "Merge a Nuke  v1.2.4",
-    Content = "Loaded! v1.2.4 — Config system fixed (WindUI.Flags bug resolved), detection radius default → 90 studs.",
+    Title   = "Merge a Nuke  v1.3.0",
+    Content = "Loaded! v1.3.0 — Auto-load config, autolock fix, Anti Nuke tab, reworked Anti-AFK, detection radius → 125.",
     Icon    = "solar:atom-bold",
-    Duration = 5,
+    Duration = 6,
 })
+
+-- ──────────────────────────────────────────────────────────────
+-- Auto-load "default" config on every script start (covers the
+-- rejoin case: queue_on_teleport re-executes this script and all
+-- previous toggle states are restored automatically).
+-- ──────────────────────────────────────────────────────────────
+task.spawn(function()
+    task.wait(0.5)  -- let WindUI finish initialising flags
+    local ConfigManager = Window.ConfigManager
+    local allConfigs = ConfigManager:AllConfigs()
+    for _, name in ipairs(allConfigs) do
+        if name == "default" then
+            local ok, err = pcall(function() ConfigManager:Config("default"):Load() end)
+            if ok then
+                WindUI:Notify({
+                    Title    = "Config",
+                    Content  = 'Auto-loaded "default" config.',
+                    Icon     = "folder-open",
+                    Duration = 3,
+                })
+            else
+                warn("[Config] Auto-load failed:", err)
+            end
+            break
+        end
+    end
+end)

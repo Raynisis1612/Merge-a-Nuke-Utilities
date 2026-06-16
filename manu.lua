@@ -1,5 +1,5 @@
 -- ============================================================
---  Merge a Nuke Utilities  v1.2.3
+--  Merge a Nuke Utilities  v1.2.4
 --  Author: Claude
 --  Game: Merge a Nuke (Place ID: 128784467030899)
 -- ============================================================
@@ -866,7 +866,7 @@ end)
 local Window = WindUI:CreateWindow({
     Title       = "Merge a Nuke Utilities",
     Icon        = "solar:atom-bold",
-    Author      = "by Claude  •  v1.2.3",
+    Author      = "by Claude  •  v1.2.4",
     Folder      = "MergeANukeUtils",
     NewElements = true,
     Topbar      = { Height = 44, ButtonsType = "Mac" },
@@ -880,7 +880,7 @@ local Window = WindUI:CreateWindow({
     },
 })
 
-Window:Tag({ Title = "v1.2.3", Icon = "zap", Color = Color3.fromHex("#1a1a2e"), Border = true })
+Window:Tag({ Title = "v1.2.4", Icon = "zap", Color = Color3.fromHex("#1a1a2e"), Border = true })
 
 -- ── MAIN SECTION ─────────────────────────────────────────────
 local MainSection = Window:Section({ Title = "Main" })
@@ -1301,7 +1301,7 @@ do
         Justify = "Center",
         Color   = Color3.fromHex("#34D399"),
         Callback = function()
-            local name = WindUI.Flags["configName"] and WindUI.Flags["configName"].Value or "default"
+            local name = configInput.Value or "default"
             name = tostring(name):gsub("[^%w_%-]", "_")
             if name == "" then name = "default" end
             local cfg = ConfigManager:Config(name)
@@ -1317,7 +1317,7 @@ do
         Justify = "Center",
         Color   = Color3.fromHex("#60A5FA"),
         Callback = function()
-            local selected = WindUI.Flags["configSelect"] and WindUI.Flags["configSelect"].Value
+            local selected = configDropdown.Value
             if not selected or selected == "" then
                 WindUI:Notify({ Title = "Config", Content = "Select a config first.", Icon = "alert-circle", Duration = 3 })
                 return
@@ -1334,20 +1334,24 @@ do
         Justify = "Center",
         Color   = Color3.fromHex("#EF4444"),
         Callback = function()
-            local selected = WindUI.Flags["configSelect"] and WindUI.Flags["configSelect"].Value
+            local selected = configDropdown.Value
             if not selected or selected == "" then
                 WindUI:Notify({ Title = "Config", Content = "Select a config first.", Icon = "alert-circle", Duration = 3 })
                 return
             end
-            -- WindUI doesn't expose a delete API, so we remove the file via writefile/delfile if available
-            local path = "WindUI/MergeANukeUtils/configs/" .. selected .. ".json"
-            pcall(function()
-                if delfile then
-                    delfile(path)
-                elseif (syn and syn.io and syn.io.delete) then
-                    syn.io.delete(path)
-                end
-            end)
+            -- Use WindUI's built-in DeleteConfig API (uses delfile internally)
+            local ok, err = ConfigManager:DeleteConfig(selected)
+            if not ok then
+                -- Fallback: manual delete via the correct config path
+                local path = "WindUI/" .. Window.Folder .. "/config/" .. selected .. ".json"
+                pcall(function()
+                    if delfile then
+                        delfile(path)
+                    elseif syn and syn.io and syn.io.delete then
+                        syn.io.delete(path)
+                    end
+                end)
+            end
             configDropdown:Refresh(ConfigManager:AllConfigs())
             WindUI:Notify({ Title = "Config", Content = 'Deleted "' .. selected .. '".', Icon = "trash-2", Duration = 3 })
         end,
@@ -1389,8 +1393,8 @@ end
 -- ──────────────────────────────────────────────────────────────
 task.wait(1)
 WindUI:Notify({
-    Title   = "Merge a Nuke  v1.2.3",
-    Content = "Loaded! v1.2.3 — Config system added, detection radius default → 90 studs.",
+    Title   = "Merge a Nuke  v1.2.4",
+    Content = "Loaded! v1.2.4 — Config system fixed (WindUI.Flags bug resolved), detection radius default → 90 studs.",
     Icon    = "solar:atom-bold",
     Duration = 5,
 })

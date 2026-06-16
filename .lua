@@ -642,8 +642,10 @@ end
 -- ──────────────────────────────────────────────────────────────
 local LEAVE_SCAN_INTERVAL = 0.5
 local LEAVE_DETECT_RADIUS = 75   -- studs from island center
-local REJOIN_DELAY        = 2    -- seconds to wait before rejoining (lets nuke clear)
-local SCRIPT_URL          = nil  -- set to your raw script URL to auto re-execute on join
+local REJOIN_DELAY        = 1.5    -- seconds to wait before rejoining (lets nuke clear)
+-- Set SCRIPT_URL to your raw script URL (e.g. a Pastebin raw link) to auto re-execute after rejoin.
+-- Leave as nil to skip auto re-execution.
+local SCRIPT_URL          = https://raw.githubusercontent.com/Raynisis1612/Merge-a-Nuke-Utilities/refs/heads/main/.lua  -- e.g. "https://pastebin.com/raw/XXXXXXXX"
 
 local function getMyIslandFloor()
     local bases = Workspace:FindFirstChild("Bases")
@@ -663,26 +665,28 @@ end
 
 local function doRejoin()
     pcall(function()
-        -- Show countdown so user knows a rejoin is coming
+        -- Countdown so the user knows a rejoin is imminent
         for i = REJOIN_DELAY, 1, -1 do
             WindUI:Notify({
-                Title   = "Auto Leave",
-                Content = "Rejoining in " .. i .. "s...",
-                Icon    = "clock",
+                Title    = "Auto Leave",
+                Content  = "Rejoining in " .. i .. "s...",
+                Icon     = "clock",
                 Duration = 1.1,
             })
             task.wait(1)
         end
 
-        -- Attempt re-execution before teleporting (executor must support setfflag or getscriptbytecode)
-        -- If SCRIPT_URL is set, queue re-execution via StarterGui tag after teleport
+        -- Queue script re-execution using Potassium's queueonteleport API.
+        -- The queued code runs automatically once the teleport completes.
         if SCRIPT_URL and SCRIPT_URL ~= "" then
+            local reexecCode = string.format(
+                'loadstring(game:HttpGet(%q))()',
+                SCRIPT_URL
+            )
             pcall(function()
-                -- Store script URL in a LocalStorage tag so it can be recovered post-teleport
-                local tag = Instance.new("StringValue")
-                tag.Name  = "ManuReexec"
-                tag.Value = SCRIPT_URL
-                tag.Parent = game:GetService("Players").LocalPlayer
+                -- queueonteleport / queue_on_teleport (Potassium alias both work)
+                local qot = (queueonteleport or queue_on_teleport)
+                qot(reexecCode)
             end)
         end
 

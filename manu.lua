@@ -1,5 +1,5 @@
 -- ============================================================
---  Merge a Nuke Utilities  v1.3.1
+--  Merge a Nuke Utilities  v1.4.0
 --  Author: Claude
 --  Game: Merge a Nuke (Place ID: 128784467030899)
 -- ============================================================
@@ -65,6 +65,7 @@ local R_HoldEnded      = NukeRemotes and NukeRemotes:WaitForChild("HoldEnded",  
 local R_RequestLock    = NukeRemotes and NukeRemotes:WaitForChild("RequestLockBase", 5)
 local R_LockStateUpdate= NukeRemotes and NukeRemotes:WaitForChild("LockStateUpdate", 5)
 local R_PurchaseUpgrade = NukeRemotes and NukeRemotes:WaitForChild("PurchaseUpgrade", 5)
+local R_Rebirth         = NukeRemotes and NukeRemotes:WaitForChild("Rebirth", 5)
 
 -- ──────────────────────────────────────────────────────────────
 -- Game Config (from source)
@@ -123,8 +124,15 @@ local State = {
 
     autoLeaveEnabled  = false,
     autoLeaveThread   = nil,
-    rejoinDelay       = 0.1,   -- seconds before rejoining after nuke detected
-    detectionRadius   = 125,   -- studs from island center to detect incoming nukes
+    rejoinDelay       = 0,     -- seconds before rejoining (default instant)
+    detectionRadius   = 90,    -- studs from island center to detect incoming nukes
+
+    smartLockEnabled  = false,
+    smartLockThread   = nil,
+    smartLockRadius   = 90,    -- studs from island center to activate smart lock
+
+    autoRebirthEnabled = false,
+    autoRebirthThread  = nil,
 
     autoRejoinEnabled = false,  -- periodic rejoin to prevent lag/perf issues
     autoRejoinThread  = nil,
@@ -511,6 +519,28 @@ local function doMergeCycle()
     if nukeA:GetAttribute("Tier") ~= targetTier then return end
     if nukeB:GetAttribute("Tier") ~= targetTier then return end
 
+    -- If we're holding a nuke, check if its value is worth keeping or we should drop first
+    -- IMPORTANT: always drop before teleporting to a small pair so we don't accidentally
+    -- carry a high-value nuke to the wrong location.
+    if serverHeldTier ~= nil then
+        local heldNow = serverHeldTier
+        -- If we're holding the same tier we want to merge, fast-path directly into it
+        if heldNow == targetTier then
+            local merged = doMergeInto(nukeA, heldNow)
+            if merged then
+                task.wait(0.3)
+            else
+                doDrop(getIslandCenter()); task.wait(0.3)
+            end
+            return
+        end
+        -- We're holding a different (likely higher) tier nuke — drop it safely first
+        doDrop(getIslandCenter())
+        task.wait(DROP_DEBOUNCE + 0.1)
+        -- Re-scan after dropping since nukes may have changed
+        return
+    end
+
     -- Pick up nukeA (separation handled inside doPickUp)
     local heldTier = doPickUp(nukeA)
     if not heldTier then task.wait(0.5); return end
@@ -875,6 +905,115 @@ end
 
 
 -- ──────────────────────────────────────────────────────────────
+-- Smart Lock
+-- Monitors incoming enemy nukes within the detection radius and
+-- fires RequestLockBase only when one is detected.
+-- ──────────────────────────────────────────────────────────────
+local SMART_LOCK_SCAN_INTERVAL = 0.3
+
+local function smartLockLoop()
+    while State.smartLockEnabled do
+        task.wait(SMART_LOCK_SCAN_INTERVAL)
+        pcall(function()
+            if lockPhase == "locked" then return end -- already locked, nothing to do
+
+            local floor = getMyIslandFloor()
+            if not floor then return end
+            local islandPos = floor.Position
+
+            for _, obj in ipairs(Workspace:GetChildren()) do
+                local state   = obj:GetAttribute("State")
+                local launcher = obj:GetAttribute("LauncherUserId")
+                if state == "flying" and launcher and launcher ~= LocalPlayer.UserId then
+                    local pos
+                    if obj:IsA("BasePart") then
+                        pos = obj.Position
+                    else
+                        local bp = obj:FindFirstChildWhichIsA("BasePart")
+                        pos = bp and bp.Position
+                    end
+                    if pos then
+                        local dx = pos.X - islandPos.X
+                        local dz = pos.Z - islandPos.Z
+                        if math.sqrt(dx*dx + dz*dz) <= State.smartLockRadius then
+                            -- Enemy nuke in range — request a lock immediately
+                            pcall(function() R_RequestLock:FireServer() end)
+                            task.wait(0.5) -- brief pause to let LockStateUpdate come back
+                            break
+                        end
+                    end
+                end
+            end
+        end)
+    end
+end
+
+local function startSmartLock()
+    if State.smartLockThread then task.cancel(State.smartLockThread) end
+    State.smartLockEnabled = true
+    State.smartLockThread  = task.spawn(smartLockLoop)
+end
+
+local function stopSmartLock()
+    State.smartLockEnabled = false
+    if State.smartLockThread then task.cancel(State.smartLockThread); State.smartLockThread = nil end
+end
+
+-- ──────────────────────────────────────────────────────────────
+-- Auto Rebirth
+-- Fires the Rebirth remote on an interval so the player auto-rebirths.
+-- ──────────────────────────────────────────────────────────────
+local REBIRTH_INTERVAL = 0.5
+
+local function startAutoRebirth()
+    if State.autoRebirthThread then task.cancel(State.autoRebirthThread) end
+    State.autoRebirthEnabled = true
+    State.autoRebirthThread = task.spawn(function()
+        while State.autoRebirthEnabled do
+            pcall(function() R_Rebirth:FireServer() end)
+            task.wait(REBIRTH_INTERVAL)
+        end
+    end)
+end
+
+local function stopAutoRebirth()
+    State.autoRebirthEnabled = false
+    if State.autoRebirthThread then task.cancel(State.autoRebirthThread); State.autoRebirthThread = nil end
+end
+
+-- ──────────────────────────────────────────────────────────────
+-- Fling on Touch (Walk Fling)
+-- Uses velocity de-sync to fling any player your character touches.
+-- Derived from DrGemini's fling technique.
+-- ──────────────────────────────────────────────────────────────
+local flingEnabled  = false
+local flingConn     = nil
+
+local function startFlingOnTouch()
+    flingEnabled = true
+    if flingConn then flingConn:Disconnect() end
+
+    flingConn = RunService.Heartbeat:Connect(function()
+        if not flingEnabled then return end
+        local hrp = getHRP()
+        if not hrp then return end
+
+        -- Velocity spike on the local root causes fling on server collision
+        local orig = hrp.Velocity
+        hrp.Velocity = (orig * 10000) + Vector3.new(0, 10000, 0)
+        RunService.RenderStepped:Wait()
+        hrp.Velocity = orig
+        RunService.Stepped:Wait()
+        hrp.Velocity = orig + Vector3.new(0, 0.1, 0)
+    end)
+end
+
+local function stopFlingOnTouch()
+    flingEnabled = false
+    if flingConn then flingConn:Disconnect(); flingConn = nil end
+end
+
+-- ──────────────────────────────────────────────────────────────
 -- Tier helpers (display)
 -- ──────────────────────────────────────────────────────────────
 local function tierToValue(tier)
@@ -905,7 +1044,7 @@ end)
 local Window = WindUI:CreateWindow({
     Title       = "Merge a Nuke Utilities",
     Icon        = "solar:atom-bold",
-    Author      = "by Claude  •  v1.3.1",
+    Author      = "by Claude  •  v1.4.0",
     Folder      = "MergeANukeUtils",
     NewElements = true,
     Topbar      = { Height = 44, ButtonsType = "Mac" },
@@ -919,7 +1058,7 @@ local Window = WindUI:CreateWindow({
     },
 })
 
-Window:Tag({ Title = "v1.3.1", Icon = "zap", Color = Color3.fromHex("#1a1a2e"), Border = true })
+Window:Tag({ Title = "v1.4.0", Icon = "zap", Color = Color3.fromHex("#1a1a2e"), Border = true })
 
 -- ──────────────────────────────────────────────────────────────
 -- Auto-save helper
@@ -1027,7 +1166,7 @@ do
 
     lockSec:Toggle({
         Title = "Enable Auto Lock", Icon = "shield",
-        Desc  = "Keeps your island locked automatically.",
+        Desc  = "Keeps your island locked at all times.",
         Value = false, Flag = "autoLock",
         Callback = function(state)
             scheduleAutoSave()
@@ -1037,14 +1176,50 @@ do
                     return
                 end
                 startAutoLock()
-                WindUI:Notify({ Title = "Auto Lock", Content = "Started! Island will stay locked.", Icon = "shield", Duration = 3 })
+                WindUI:Notify({ Title = "Auto Lock", Content = "Started!", Icon = "shield", Duration = 3 })
             else
                 stopAutoLock()
                 WindUI:Notify({ Title = "Auto Lock", Content = "Stopped.", Duration = 2 })
             end
         end,
     })
+
     lockSec:Space()
+
+    lockSec:Toggle({
+        Title = "Smart Lock", Icon = "shield-off",
+        Desc  = "Locks only when an enemy nuke enters your detection radius.",
+        Value = false, Flag = "smartLock",
+        Callback = function(state)
+            scheduleAutoSave()
+            if state then
+                if not R_RequestLock then
+                    WindUI:Notify({ Title = "Error", Content = "RequestLockBase remote not found.", Icon = "alert-circle", Duration = 4 })
+                    return
+                end
+                startSmartLock()
+                WindUI:Notify({ Title = "Smart Lock", Content = "Active.", Icon = "shield-off", Duration = 3 })
+            else
+                stopSmartLock()
+                WindUI:Notify({ Title = "Smart Lock", Content = "Stopped.", Duration = 2 })
+            end
+        end,
+    })
+
+    lockSec:Space()
+
+    lockSec:Slider({
+        Title = "Smart Lock Radius",
+        Desc  = "Studs from your island to trigger a lock.",
+        Value = { Min = 10, Max = 200, Default = 90 }, Step = 1,
+        IsTooltip = true, IsTextbox = true, Flag = "smartLockRadius",
+        Callback = function(v)
+            State.smartLockRadius = v; scheduleAutoSave()
+        end,
+    })
+
+    lockSec:Space()
+
     lockSec:Button({
         Title = "Lock Now", Icon = "shield", Justify = "Center",
         Color = Color3.fromHex("#34D399"),
@@ -1068,7 +1243,7 @@ do
                 elseif lockPhase == "cooldown" then
                     detail = ("  (%ds cooldown)"):format(lockSecondsLeft)
                 end
-                local autoStr = State.autoLockEnabled and "  [Auto: ON]" or "  [Auto: OFF]"
+                local autoStr = State.autoLockEnabled and "  [Auto: ON]" or (State.smartLockEnabled and "  [Smart: ON]" or "  [Auto: OFF]")
                 lockStatusPara:setTitle("Status")
                 lockStatusPara:setDesc("Phase: " .. phaseStr .. detail .. autoStr)
             end)
@@ -1114,6 +1289,31 @@ do
     })
 end
 
+-- ── Auto Rebirth Tab ────────────────────────────────────────
+local RebirthTab = MainSection:Tab({
+    Title = "Auto Rebirth", Icon = "rotate-ccw",
+    IconColor = Color3.fromHex("#FB923C"), Border = true,
+})
+do
+    local rebirthSec = RebirthTab:Section({ Title = "Auto Rebirth", Box = true, BoxBorder = true, Opened = true })
+
+    rebirthSec:Toggle({
+        Title = "Enable Auto Rebirth", Icon = "rotate-ccw",
+        Desc  = "Automatically rebirths for you.",
+        Value = false, Flag = "autoRebirth",
+        Callback = function(state)
+            scheduleAutoSave()
+            if state then
+                startAutoRebirth()
+                WindUI:Notify({ Title = "Auto Rebirth", Content = "Active.", Icon = "rotate-ccw", Duration = 3 })
+            else
+                stopAutoRebirth()
+                WindUI:Notify({ Title = "Auto Rebirth", Content = "Stopped.", Duration = 2 })
+            end
+        end,
+    })
+end
+
 -- ── Anti Nuke Tab ────────────────────────────────────────────
 local LeaveTab = MainSection:Tab({
     Title = "Anti Nuke", Icon = "shield-x",
@@ -1142,8 +1342,8 @@ do
 
     leaveSec:Slider({
         Title = "Rejoin Delay",
-        Desc  = "Seconds to wait before rejoining after a nuke is detected.",
-        Value = { Min = 0.1, Max = 5, Default = 0.1 }, Step = 0.1,
+        Desc  = "Seconds to wait before rejoining after a nuke is detected. 0 = instant.",
+        Value = { Min = 0, Max = 5, Default = 0 }, Step = 0.1,
         IsTooltip = true, IsTextbox = true, Flag = "rejoinDelay",
         Callback = function(v)
             State.rejoinDelay = v; scheduleAutoSave()
@@ -1155,7 +1355,7 @@ do
     leaveSec:Slider({
         Title = "Detection Radius",
         Desc  = "Studs from your island center to watch for incoming enemy nukes.",
-        Value = { Min = 10, Max = 200, Default = 125 }, Step = 1,
+        Value = { Min = 10, Max = 200, Default = 90 }, Step = 1,
         IsTooltip = true, IsTextbox = true, Flag = "detectionRadius",
         Callback = function(v)
             State.detectionRadius = v; scheduleAutoSave()
@@ -1317,6 +1517,93 @@ do
             WindUI:Notify({ Title = "Infinite Yield", Content = "Loading...", Icon = "terminal", Duration = 3 })
         end,
     })
+
+    FunTab:Space()
+
+    -- ── Walk Fling ──────────────────────────────────────────
+    local flingSec = FunTab:Section({ Title = "Walk Fling", Box = true, BoxBorder = true, Opened = true })
+
+    flingSec:Toggle({
+        Title = "Fling on Touch", Icon = "zap",
+        Desc  = "Flings players your character touches.",
+        Value = false, Flag = "flingOnTouch",
+        Callback = function(state)
+            if state then
+                startFlingOnTouch()
+                WindUI:Notify({ Title = "Walk Fling", Content = "Active.", Icon = "zap", Duration = 3 })
+            else
+                stopFlingOnTouch()
+                WindUI:Notify({ Title = "Walk Fling", Content = "Stopped.", Duration = 2 })
+            end
+        end,
+    })
+
+    FunTab:Space()
+
+    -- ── Teleport to Player ──────────────────────────────────
+    local tpSec = FunTab:Section({ Title = "Teleport to Player", Box = true, BoxBorder = true, Opened = true })
+
+    local playerDropdown
+    playerDropdown = tpSec:Dropdown({
+        Title     = "Select Player",
+        Desc      = "Choose a player to teleport to.",
+        Values    = {},
+        AllowNone = true,
+        Flag      = "tpPlayerSelect",
+        Callback  = function(_) end,
+    })
+
+    tpSec:Space()
+
+    -- Refresh player list on open and via button
+    local function refreshPlayerList()
+        local names = {}
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer then
+                table.insert(names, p.Name)
+            end
+        end
+        pcall(function() playerDropdown:Refresh(names) end)
+    end
+
+    -- Auto-refresh when players join/leave
+    Players.PlayerAdded:Connect(function() task.wait(0.5); refreshPlayerList() end)
+    Players.PlayerRemoving:Connect(function() task.wait(0.5); refreshPlayerList() end)
+    task.defer(refreshPlayerList)
+
+    local tpStack = tpSec:HStack({ AutoSpace = true })
+
+    tpStack:Button({
+        Title = "Teleport", Icon = "user", Justify = "Center",
+        Color = Color3.fromHex("#60A5FA"),
+        Callback = function()
+            local selected = playerDropdown.Value
+            if not selected or selected == "" then
+                WindUI:Notify({ Title = "Teleport", Content = "Select a player first.", Icon = "alert-circle", Duration = 3 })
+                return
+            end
+            local target = Players:FindFirstChild(selected)
+            if not target or not target.Character then
+                WindUI:Notify({ Title = "Teleport", Content = "Player not found.", Icon = "alert-circle", Duration = 3 })
+                return
+            end
+            local targetHRP = target.Character:FindFirstChild("HumanoidRootPart")
+            if not targetHRP then
+                WindUI:Notify({ Title = "Teleport", Content = "Target has no root.", Icon = "alert-circle", Duration = 3 })
+                return
+            end
+            teleportTo(targetHRP.Position)
+            WindUI:Notify({ Title = "Teleport", Content = "Teleported to " .. selected .. ".", Icon = "user", Duration = 2 })
+        end,
+    })
+
+    tpStack:Button({
+        Title = "Refresh", Icon = "refresh-cw", Justify = "Center",
+        Callback = function()
+            refreshPlayerList()
+            WindUI:Notify({ Title = "Players", Content = "List refreshed.", Duration = 2 })
+        end,
+    })
 end
 
 -- ── SETTINGS TAB ─────────────────────────────────────────────
@@ -1466,8 +1753,8 @@ end
 -- ──────────────────────────────────────────────────────────────
 task.wait(1)
 WindUI:Notify({
-    Title   = "Merge a Nuke  v1.3.1",
-    Content = "Loaded! v1.3.1 — Auto-load config, autolock fix, Anti Nuke tab, reworked Anti-AFK, detection radius → 125.",
+    Title   = "Merge a Nuke  v1.4.0",
+    Content = "Loaded! v1.4.0",
     Icon    = "solar:atom-bold",
     Duration = 6,
 })

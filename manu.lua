@@ -1,5 +1,5 @@
 -- ============================================================
---  Merge a Nuke Utilities  v1.4.0
+--  Merge a Nuke Utilities  v1.4.5
 --  Author: Claude
 --  Game: Merge a Nuke (Place ID: 128784467030899)
 -- ============================================================
@@ -65,7 +65,8 @@ local R_HoldEnded      = NukeRemotes and NukeRemotes:WaitForChild("HoldEnded",  
 local R_RequestLock    = NukeRemotes and NukeRemotes:WaitForChild("RequestLockBase", 5)
 local R_LockStateUpdate= NukeRemotes and NukeRemotes:WaitForChild("LockStateUpdate", 5)
 local R_PurchaseUpgrade = NukeRemotes and NukeRemotes:WaitForChild("PurchaseUpgrade", 5)
-local R_Rebirth         = NukeRemotes and NukeRemotes:WaitForChild("Rebirth", 5)
+local R_RequestRebirth  = NukeRemotes and NukeRemotes:WaitForChild("RequestRebirth",  5)
+local R_RedeemCode      = NukeRemotes and NukeRemotes:WaitForChild("RedeemCode",      5)
 
 -- ──────────────────────────────────────────────────────────────
 -- Game Config (from source)
@@ -125,7 +126,7 @@ local State = {
     autoLeaveEnabled  = false,
     autoLeaveThread   = nil,
     rejoinDelay       = 0,     -- seconds before rejoining (default instant)
-    detectionRadius   = 90,    -- studs from island center to detect incoming nukes
+    detectionRadius   = 50,    -- studs from island center to detect incoming nukes
 
     smartLockEnabled  = false,
     smartLockThread   = nil,
@@ -905,6 +906,215 @@ end
 
 
 -- ──────────────────────────────────────────────────────────────
+-- Anti-Fling (from Infinite Yield open-source pattern)
+-- Zeroes HRP velocity whenever it spikes above a safe threshold,
+-- preventing other players from flinging you.
+-- ──────────────────────────────────────────────────────────────
+local antiFlingConn = nil
+
+local function startAntiFling()
+    if antiFlingConn then antiFlingConn:Disconnect() end
+    antiFlingConn = RunService.Heartbeat:Connect(function()
+        local hrp = getHRP()
+        if not hrp then return end
+        local vel = hrp.AssemblyLinearVelocity
+        if vel.Magnitude > 300 then
+            hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        end
+    end)
+end
+
+local function stopAntiFling()
+    if antiFlingConn then antiFlingConn:Disconnect(); antiFlingConn = nil end
+end
+
+-- ──────────────────────────────────────────────────────────────
+-- Value Tracker helpers
+-- Reads overhead nuke values per player by scanning Workspace.Bases.
+-- Each nuke part has a Tier attribute; value = 2^(tier-1).
+-- ──────────────────────────────────────────────────────────────
+local function formatNukeValue(v)
+    if v >= 1e15 then return string.format("%.2fQd", v/1e15)
+    elseif v >= 1e12 then return string.format("%.2fT",  v/1e12)
+    elseif v >= 1e9  then return string.format("%.2fB",  v/1e9)
+    elseif v >= 1e6  then return string.format("%.2fM",  v/1e6)
+    elseif v >= 1e3  then return string.format("%.2fK",  v/1e3)
+    else return tostring(math.floor(v)) end
+end
+
+local function scanAllIslandValues()
+    local results = {}   -- { userId, name, totalValue, baseFloor }
+    local bases = Workspace:FindFirstChild("Bases")
+    if not bases then return results end
+
+    local playerMap = {}
+    for _, p in ipairs(Players:GetPlayers()) do
+        playerMap[p.UserId] = p.Name
+    end
+
+    for _, base in ipairs(bases:GetChildren()) do
+        local nukesFolder = base:FindFirstChild("Nukes")
+        if not nukesFolder then continue end
+
+        local ownerMap = {}  -- userId → { name, totalValue, floor }
+        for _, nuke in ipairs(nukesFolder:GetChildren()) do
+            if nuke:IsA("BasePart") then
+                local uid  = nuke:GetAttribute("OwnerUserId")
+                local tier = nuke:GetAttribute("Tier")
+                if uid and tier then
+                    local val = 2 ^ (tier - 1)
+                    if not ownerMap[uid] then
+                        ownerMap[uid] = {
+                            userId     = uid,
+                            name       = playerMap[uid] or ("UserId:"..tostring(uid)),
+                            totalValue = 0,
+                            floor      = base:FindFirstChild("Floor"),
+                        }
+                    end
+                    ownerMap[uid].totalValue += val
+                end
+            end
+        end
+
+        for _, entry in pairs(ownerMap) do
+            -- Merge if same player appears on multiple bases (shouldn't happen, but safe)
+            local found = false
+            for _, r in ipairs(results) do
+                if r.userId == entry.userId then
+                    r.totalValue += entry.totalValue
+                    found = true; break
+                end
+            end
+            if not found then
+                table.insert(results, entry)
+            end
+        end
+    end
+
+    -- Sort by value descending
+    table.sort(results, function(a, b) return a.totalValue > b.totalValue end)
+    return results
+end
+
+-- Overhead BillboardGuis attached to each player's island floor
+local valueTrackerBillboards = {}
+
+local function clearValueTrackerBillboards()
+    for _, gui in ipairs(valueTrackerBillboards) do
+        pcall(function() gui:Destroy() end)
+    end
+    valueTrackerBillboards = {}
+end
+
+local function showValueTrackerBillboards()
+    clearValueTrackerBillboards()
+    local scan = scanAllIslandValues()
+    for _, entry in ipairs(scan) do
+        if entry.floor and entry.floor.Parent then
+            local bg = Instance.new("BillboardGui")
+            bg.Name    = "ValueTrackerLabel"
+            bg.Size    = UDim2.new(0, 160, 0, 40)
+            bg.StudsOffset = Vector3.new(0, 18, 0)
+            bg.AlwaysOnTop = true
+            bg.MaxDistance = 2000
+            bg.Parent  = entry.floor
+
+            local lbl = Instance.new("TextLabel")
+            lbl.Size              = UDim2.new(1, 0, 1, 0)
+            lbl.BackgroundColor3  = Color3.fromHex("#111111")
+            lbl.BackgroundTransparency = 0.35
+            lbl.TextColor3        = entry.userId == LocalPlayer.UserId
+                                    and Color3.fromHex("#34D399")
+                                    or  Color3.fromHex("#FFFFFF")
+            lbl.Font              = Enum.Font.GothamBold
+            lbl.TextScaled        = true
+            lbl.Text              = entry.name .. "\n💰 " .. formatNukeValue(entry.totalValue)
+            lbl.Parent            = bg
+
+            local corner = Instance.new("UICorner")
+            corner.CornerRadius = UDim.new(0, 6)
+            corner.Parent       = lbl
+
+            table.insert(valueTrackerBillboards, bg)
+        end
+    end
+end
+
+-- ──────────────────────────────────────────────────────────────
+-- Home Button (built-in convenience feature)
+-- When the client is > HOME_DIST studs from their island center,
+-- a button appears at the bottom-center of the screen.
+-- ──────────────────────────────────────────────────────────────
+local HOME_DIST = 200
+
+local homeGui = nil
+local homeConn = nil
+
+local function buildHomeGui()
+    -- Remove old gui if present
+    if homeGui then homeGui:Destroy(); homeGui = nil end
+
+    local pg = LocalPlayer:WaitForChild("PlayerGui", 10)
+    if not pg then return end
+
+    local sg = Instance.new("ScreenGui")
+    sg.Name              = "NukeHubHomeButton"
+    sg.ResetOnSpawn      = false
+    sg.DisplayOrder      = 50
+    sg.ZIndexBehavior    = Enum.ZIndexBehavior.Sibling
+    sg.Parent            = pg
+    homeGui              = sg
+
+    local btn = Instance.new("TextButton")
+    btn.Name             = "HomeBtn"
+    btn.Size             = UDim2.new(0, 160, 0, 44)
+    btn.AnchorPoint      = Vector2.new(0.5, 1)
+    btn.Position         = UDim2.new(0.5, 0, 1, -20)
+    btn.BackgroundColor3 = Color3.fromHex("#FF4500")
+    btn.TextColor3       = Color3.fromHex("#FFFFFF")
+    btn.Font             = Enum.Font.GothamBold
+    btn.TextSize         = 16
+    btn.Text             = "🏠  Go Home"
+    btn.Visible          = false
+    btn.Parent           = sg
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius  = UDim.new(0, 10)
+    corner.Parent        = btn
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Color         = Color3.fromHex("#FF8C00")
+    stroke.Thickness     = 2
+    stroke.Parent        = btn
+
+    btn.MouseButton1Click:Connect(function()
+        local center = getIslandCenter()
+        if center ~= Vector3.new(0, 0, 0) then
+            teleportTo(center)
+        end
+    end)
+
+    -- Poll position and toggle button visibility
+    if homeConn then homeConn:Disconnect() end
+    homeConn = RunService.Heartbeat:Connect(function()
+        local hrp = getHRP()
+        if not hrp then btn.Visible = false; return end
+        local center = getIslandCenter()
+        if center == Vector3.new(0, 0, 0) then btn.Visible = false; return end
+        local dx = hrp.Position.X - center.X
+        local dz = hrp.Position.Z - center.Z
+        btn.Visible = math.sqrt(dx*dx + dz*dz) > HOME_DIST
+    end)
+
+    return sg
+end
+
+-- Build the home button right away
+task.defer(buildHomeGui)
+
+
+
+-- ──────────────────────────────────────────────────────────────
 -- Smart Lock
 -- Monitors incoming enemy nukes within the detection radius and
 -- fires RequestLockBase only when one is detected.
@@ -970,7 +1180,7 @@ local function startAutoRebirth()
     State.autoRebirthEnabled = true
     State.autoRebirthThread = task.spawn(function()
         while State.autoRebirthEnabled do
-            pcall(function() R_Rebirth:FireServer() end)
+            pcall(function() R_RequestRebirth:FireServer() end)
             task.wait(REBIRTH_INTERVAL)
         end
     end)
@@ -1044,7 +1254,7 @@ end)
 local Window = WindUI:CreateWindow({
     Title       = "Merge a Nuke Utilities",
     Icon        = "solar:atom-bold",
-    Author      = "by Claude  •  v1.4.0",
+    Author      = "by Claude  •  v1.4.5",
     Folder      = "MergeANukeUtils",
     NewElements = true,
     Topbar      = { Height = 44, ButtonsType = "Mac" },
@@ -1058,7 +1268,7 @@ local Window = WindUI:CreateWindow({
     },
 })
 
-Window:Tag({ Title = "v1.4.0", Icon = "zap", Color = Color3.fromHex("#1a1a2e"), Border = true })
+Window:Tag({ Title = "v1.4.5", Icon = "zap", Color = Color3.fromHex("#1a1a2e"), Border = true })
 
 -- ──────────────────────────────────────────────────────────────
 -- Auto-save helper
@@ -1355,7 +1565,7 @@ do
     leaveSec:Slider({
         Title = "Detection Radius",
         Desc  = "Studs from your island center to watch for incoming enemy nukes.",
-        Value = { Min = 10, Max = 200, Default = 90 }, Step = 1,
+        Value = { Min = 10, Max = 200, Default = 50 }, Step = 1,
         IsTooltip = true, IsTextbox = true, Flag = "detectionRadius",
         Callback = function(v)
             State.detectionRadius = v; scheduleAutoSave()
@@ -1425,6 +1635,112 @@ do
             end
         end,
     })
+end
+
+-- ── Value Tracker Tab ────────────────────────────────────────
+local ValueTrackerTab = MainSection:Tab({
+    Title = "Value Tracker", Icon = "bar-chart-2",
+    IconColor = Color3.fromHex("#F59E0B"), Border = true,
+})
+do
+    local vtSec = ValueTrackerTab:Section({ Title = "Island Value Tracker", Box = true, BoxBorder = true, Opened = true })
+
+    local vtPara = vtSec:Paragraph({ Title = "Island Values", Desc = "Press Scan to load." })
+
+    vtSec:Space()
+
+    vtSec:Toggle({
+        Title = "Show Values On Islands", Icon = "eye",
+        Desc  = "Displays each player's total nuke value above their island.",
+        Value = false, Flag = "valueTrackerOverlay",
+        Callback = function(state)
+            if state then
+                showValueTrackerBillboards()
+            else
+                clearValueTrackerBillboards()
+            end
+        end,
+    })
+
+    vtSec:Space()
+
+    vtSec:Button({
+        Title = "Scan Islands", Icon = "refresh-cw", Justify = "Center",
+        Color = Color3.fromHex("#F59E0B"),
+        Callback = function()
+            task.spawn(function()
+                local scan = scanAllIslandValues()
+                if #scan == 0 then
+                    vtPara:setDesc("No islands found. Make sure you're in the game.")
+                    return
+                end
+                local lines = {}
+                for i, entry in ipairs(scan) do
+                    local tag = entry.userId == LocalPlayer.UserId and " ◀ You" or ""
+                    table.insert(lines, string.format("%d. %s — %s%s", i, entry.name, formatNukeValue(entry.totalValue), tag))
+                end
+                vtPara:setDesc(table.concat(lines, "\n"))
+
+                -- Refresh overlays if toggle is on
+                local F = WindUI.Flags
+                if F and F["valueTrackerOverlay"] and F["valueTrackerOverlay"].Value then
+                    showValueTrackerBillboards()
+                end
+            end)
+        end,
+    })
+end
+
+-- ── Code Redeemer Tab ────────────────────────────────────────
+local CodeTab = MainSection:Tab({
+    Title = "Code Redeemer", Icon = "gift",
+    IconColor = Color3.fromHex("#EC4899"), Border = true,
+})
+do
+    -- Codes found in game source (NukeShared.Codes module)
+    local CODES = {
+        { code = "BOOM",    label = "+$5K Cash",               desc = "Gives 5,000 in-game cash." },
+        { code = "UPDATE",  label = "+5 Nukes",                 desc = "Gives 5 free nukes." },
+        { code = "UPDATE2", label = "+$10K & +10 Nukes",        desc = "Gives 10,000 cash and 10 nukes." },
+        { code = "ATOMIC",  label = "+$10K & +20 Nukes",        desc = "Gives 10,000 cash and 20 nukes. Best nuke haul." },
+        { code = "ADMIN",   label = "+50% Cash & +10 Nukes",    desc = "Boosts your current cash by 50% and gives 10 nukes. Use when rich." },
+    }
+
+    local codeSec = CodeTab:Section({ Title = "Redeem Codes", Box = true, BoxBorder = true, Opened = true })
+
+    local codeResultPara = codeSec:Paragraph({ Title = "Result", Desc = "Select a code to redeem." })
+
+    codeSec:Space()
+
+    for _, entry in ipairs(CODES) do
+        local e = entry  -- capture
+        codeSec:Button({
+            Title    = e.code .. "  —  " .. e.label,
+            Desc     = e.desc,
+            Icon     = "gift",
+            Justify  = "Center",
+            Color    = Color3.fromHex("#EC4899"),
+            Callback = function()
+                task.spawn(function()
+                    if not R_RedeemCode then
+                        codeResultPara:setDesc("RedeemCode remote not found.")
+                        return
+                    end
+                    local ok, result = pcall(function()
+                        return R_RedeemCode:InvokeServer(e.code)
+                    end)
+                    if ok then
+                        local msg = tostring(result)
+                        codeResultPara:setDesc(e.code .. ": " .. msg)
+                        WindUI:Notify({ Title = "Code Redeemer", Content = e.code .. " → " .. msg, Icon = "gift", Duration = 4 })
+                    else
+                        codeResultPara:setDesc("Error: " .. tostring(result))
+                    end
+                end)
+            end,
+        })
+        codeSec:Space()
+    end
 end
 
 -- ── PLAYER TAB ───────────────────────────────────────────────
@@ -1515,6 +1831,26 @@ do
                 loadstring(game:HttpGet("https://raw.githubusercontent.com/EdgeIY/infiniteyield/master/source"))()
             end)
             WindUI:Notify({ Title = "Infinite Yield", Content = "Loading...", Icon = "terminal", Duration = 3 })
+        end,
+    })
+
+    FunTab:Space()
+
+    -- ── Anti-Fling ──────────────────────────────────────────
+    local antiFlinSec = FunTab:Section({ Title = "Anti-Fling", Box = true, BoxBorder = true, Opened = true })
+
+    antiFlinSec:Toggle({
+        Title = "Anti-Fling", Icon = "shield",
+        Desc  = "Prevents other players from flinging you.",
+        Value = false, Flag = "antiFling",
+        Callback = function(state)
+            if state then
+                startAntiFling()
+                WindUI:Notify({ Title = "Anti-Fling", Content = "Active.", Icon = "shield", Duration = 3 })
+            else
+                stopAntiFling()
+                WindUI:Notify({ Title = "Anti-Fling", Content = "Stopped.", Duration = 2 })
+            end
         end,
     })
 
@@ -1741,6 +2077,10 @@ do
             stopAutoLeave()
             stopAutoRejoin()
             stopAntiAfk()
+            stopAntiFling()
+            clearValueTrackerBillboards()
+            if homeConn then homeConn:Disconnect(); homeConn = nil end
+            if homeGui  then homeGui:Destroy();     homeGui  = nil end
             if holdStartedConn then holdStartedConn:Disconnect() end
             if holdEndedConn   then holdEndedConn:Disconnect()   end
             Window:Destroy()
@@ -1753,8 +2093,8 @@ end
 -- ──────────────────────────────────────────────────────────────
 task.wait(1)
 WindUI:Notify({
-    Title   = "Merge a Nuke  v1.4.0",
-    Content = "Loaded! v1.4.0",
+    Title   = "Merge a Nuke  v1.4.5",
+    Content = "Loaded! v1.4.5",
     Icon    = "solar:atom-bold",
     Duration = 6,
 })
@@ -1799,6 +2139,7 @@ task.spawn(function()
     v = flagVal("mergeDelay");      if v then State.autoMergeDelay  = v end
     v = flagVal("rejoinDelay");     if v then State.rejoinDelay      = v end
     v = flagVal("detectionRadius"); if v then State.detectionRadius  = v end
+    v = flagVal("smartLockRadius"); if v then State.smartLockRadius  = v end
     v = flagVal("rejoinInterval");  if v then State.autoRejoinMinutes = v end
     v = flagVal("walkSpeed")
     if v then
@@ -1822,9 +2163,10 @@ task.spawn(function()
         if R_RequestLock then startAutoLock() end
     end
 
-    if flagOn("autoLeave")  then startAutoLeave()  end
-    if flagOn("autoRejoin") then startAutoRejoin() end
-    if flagOn("antiAfk")    then startAntiAfk()    end
+    if flagOn("autoLeave")   then startAutoLeave()   end
+    if flagOn("autoRejoin")  then startAutoRejoin()  end
+    if flagOn("antiAfk")     then startAntiAfk()     end
+    if flagOn("autoRebirth") then startAutoRebirth() end
 
     if flagOn("autoUpg_TIER")     then startAutoUpgrade("TIER")     end
     if flagOn("autoUpg_MAX")      then startAutoUpgrade("MAX")       end

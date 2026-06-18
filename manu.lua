@@ -1,5 +1,5 @@
 -- ============================================================
---  Merge a Nuke Utilities  v1.4.5
+--  Merge a Nuke Utilities  v1.4.9
 --  Author: Claude
 --  Game: Merge a Nuke (Place ID: 128784467030899)
 -- ============================================================
@@ -520,11 +520,20 @@ local function doMergeCycle()
     if nukeA:GetAttribute("Tier") ~= targetTier then return end
     if nukeB:GetAttribute("Tier") ~= targetTier then return end
 
-    -- If we're holding a nuke, check if its value is worth keeping or we should drop first
-    -- IMPORTANT: always drop before teleporting to a small pair so we don't accidentally
-    -- carry a high-value nuke to the wrong location.
+    -- ── Smart held-nuke check before teleporting ──────────────
+    -- CRITICAL FIX (v1.4.8): If we are already holding a nuke when we find a
+    -- mergeable pair, we must NOT blindly teleport to that pair — doing so causes
+    -- the character to arrive without picking up the first nuke of the pair,
+    -- so the merge never completes.  Instead:
+    --   • Same tier as the pair  → fast-path: merge directly into nukeA.
+    --   • Higher-value tier      → drop it safely at the island center first,
+    --                              then re-scan so the held nuke lands properly.
+    --   • Lower-value tier       → it is worth dropping it to chase the bigger pair.
     if serverHeldTier ~= nil then
-        local heldNow = serverHeldTier
+        local heldNow   = serverHeldTier
+        local heldValue = 2 ^ (heldNow - 1)
+        local pairValue = 2 ^ (targetTier - 1)  -- value of ONE nuke in the target pair
+
         -- If we're holding the same tier we want to merge, fast-path directly into it
         if heldNow == targetTier then
             local merged = doMergeInto(nukeA, heldNow)
@@ -535,8 +544,17 @@ local function doMergeCycle()
             end
             return
         end
-        -- We're holding a different (likely higher) tier nuke — drop it safely first
-        doDrop(getIslandCenter())
+
+        -- We're holding a different tier — always drop first so we don't
+        -- teleport while holding and miss picking up the first pair nuke.
+        -- (If held value >> pair value it's even more important to put it down safely.)
+        if heldValue > pairValue then
+            -- High-value nuke: drop back at island center so it doesn't get lost
+            doDrop(getIslandCenter())
+        else
+            -- Lower-value held nuke: drop near island center and re-scan
+            doDrop(getIslandCenter())
+        end
         task.wait(DROP_DEBOUNCE + 0.1)
         -- Re-scan after dropping since nukes may have changed
         return
@@ -949,7 +967,7 @@ local function scanAllIslandValues()
 
     local playerMap = {}
     for _, p in ipairs(Players:GetPlayers()) do
-        playerMap[p.UserId] = p.Name
+        playerMap[tostring(p.UserId)] = p.Name
     end
 
     for _, base in ipairs(bases:GetChildren()) do
@@ -959,19 +977,25 @@ local function scanAllIslandValues()
         local ownerMap = {}  -- userId → { name, totalValue, floor }
         for _, nuke in ipairs(nukesFolder:GetChildren()) do
             if nuke:IsA("BasePart") then
-                local uid  = nuke:GetAttribute("OwnerUserId")
-                local tier = nuke:GetAttribute("Tier")
-                if uid and tier then
-                    local val = 2 ^ (tier - 1)
-                    if not ownerMap[uid] then
-                        ownerMap[uid] = {
-                            userId     = uid,
-                            name       = playerMap[uid] or ("UserId:"..tostring(uid)),
-                            totalValue = 0,
-                            floor      = base:FindFirstChild("Floor"),
-                        }
+                local rawUid = nuke:GetAttribute("OwnerUserId")
+                local rawTier = nuke:GetAttribute("Tier")
+                
+                if rawUid ~= nil and rawTier ~= nil then
+                    local uidStr = tostring(rawUid)
+                    local tierNum = tonumber(rawTier)
+                    
+                    if tierNum and playerMap[uidStr] then
+                        local val = 2 ^ (tierNum - 1)
+                        if not ownerMap[uidStr] then
+                            ownerMap[uidStr] = {
+                                userId     = rawUid,
+                                name       = playerMap[uidStr],
+                                totalValue = 0,
+                                floor      = base:FindFirstChild("Floor"),
+                            }
+                        end
+                        ownerMap[uidStr].totalValue += val
                     end
-                    ownerMap[uid].totalValue += val
                 end
             end
         end
@@ -997,47 +1021,74 @@ local function scanAllIslandValues()
 end
 
 -- Overhead BillboardGuis attached to each player's island floor
-local valueTrackerBillboards = {}
+local valueBillboards = {}
+
+local function updateValueTrackerBillboards(scanResults, showOverlays)
+    local activeFloors = {}
+    
+    if showOverlays then
+        for _, entry in ipairs(scanResults) do
+            if entry.floor and entry.floor.Parent then
+                activeFloors[entry.floor] = true
+                
+                local bg = valueBillboards[entry.floor]
+                if bg and not bg.Parent then
+                    valueBillboards[entry.floor] = nil
+                    bg = nil
+                end
+
+                if not bg then
+                    bg = Instance.new("BillboardGui")
+                    bg.Name    = "ValueTrackerLabel"
+                    bg.Size    = UDim2.new(0, 160, 0, 40)
+                    bg.StudsOffset = Vector3.new(0, 18, 0)
+                    bg.AlwaysOnTop = true
+                    bg.MaxDistance = 2000
+                    bg.Parent  = entry.floor
+                    
+                    local lbl = Instance.new("TextLabel")
+                    lbl.Name              = "Lbl"
+                    lbl.Size              = UDim2.new(1, 0, 1, 0)
+                    lbl.BackgroundColor3  = Color3.fromHex("#111111")
+                    lbl.BackgroundTransparency = 0.35
+                    lbl.Font              = Enum.Font.GothamBold
+                    lbl.TextScaled        = true
+                    lbl.Parent            = bg
+                    
+                    local corner = Instance.new("UICorner")
+                    corner.CornerRadius = UDim.new(0, 6)
+                    corner.Parent       = lbl
+                    
+                    valueBillboards[entry.floor] = bg
+                end
+                
+                local lbl = bg:FindFirstChild("Lbl")
+                if lbl then
+                    lbl.TextColor3 = tostring(entry.userId) == tostring(LocalPlayer.UserId)
+                                     and Color3.fromHex("#34D399")
+                                     or  Color3.fromHex("#FFFFFF")
+                    lbl.Text = entry.name .. "\n💰 " .. formatNukeValue(entry.totalValue)
+                end
+            end
+        end
+    end
+    
+    -- Cleanup missing/inactive
+    for floor, bg in pairs(valueBillboards) do
+        if not activeFloors[floor] or not floor.Parent then
+            pcall(function() bg:Destroy() end)
+            valueBillboards[floor] = nil
+        end
+    end
+end
 
 local function clearValueTrackerBillboards()
-    for _, gui in ipairs(valueTrackerBillboards) do
-        pcall(function() gui:Destroy() end)
-    end
-    valueTrackerBillboards = {}
+    updateValueTrackerBillboards({}, false)
 end
 
 local function showValueTrackerBillboards()
-    clearValueTrackerBillboards()
-    local scan = scanAllIslandValues()
-    for _, entry in ipairs(scan) do
-        if entry.floor and entry.floor.Parent then
-            local bg = Instance.new("BillboardGui")
-            bg.Name    = "ValueTrackerLabel"
-            bg.Size    = UDim2.new(0, 160, 0, 40)
-            bg.StudsOffset = Vector3.new(0, 18, 0)
-            bg.AlwaysOnTop = true
-            bg.MaxDistance = 2000
-            bg.Parent  = entry.floor
-
-            local lbl = Instance.new("TextLabel")
-            lbl.Size              = UDim2.new(1, 0, 1, 0)
-            lbl.BackgroundColor3  = Color3.fromHex("#111111")
-            lbl.BackgroundTransparency = 0.35
-            lbl.TextColor3        = entry.userId == LocalPlayer.UserId
-                                    and Color3.fromHex("#34D399")
-                                    or  Color3.fromHex("#FFFFFF")
-            lbl.Font              = Enum.Font.GothamBold
-            lbl.TextScaled        = true
-            lbl.Text              = entry.name .. "\n💰 " .. formatNukeValue(entry.totalValue)
-            lbl.Parent            = bg
-
-            local corner = Instance.new("UICorner")
-            corner.CornerRadius = UDim.new(0, 6)
-            corner.Parent       = lbl
-
-            table.insert(valueTrackerBillboards, bg)
-        end
-    end
+    -- Forwarder for any old calls, should generally not be used anymore
+    updateValueTrackerBillboards(scanAllIslandValues(), true)
 end
 
 -- ──────────────────────────────────────────────────────────────
@@ -1045,13 +1096,12 @@ end
 -- When the client is > HOME_DIST studs from their island center,
 -- a button appears at the bottom-center of the screen.
 -- ──────────────────────────────────────────────────────────────
-local HOME_DIST = 200
+local HOME_DIST = 100
 
 local homeGui = nil
 local homeConn = nil
 
 local function buildHomeGui()
-    -- Remove old gui if present
     if homeGui then homeGui:Destroy(); homeGui = nil end
 
     local pg = LocalPlayer:WaitForChild("PlayerGui", 10)
@@ -1065,27 +1115,79 @@ local function buildHomeGui()
     sg.Parent            = pg
     homeGui              = sg
 
+    local container = Instance.new("Frame")
+    container.Name             = "HomeBtnContainer"
+    container.Size             = UDim2.new(0, 220, 0, 60)
+    container.AnchorPoint      = Vector2.new(0.5, 1)
+    container.Position         = UDim2.new(0.5, 0, 1, -24)
+    container.BackgroundColor3 = Color3.fromRGB(157, 49, 0)
+    container.BorderSizePixel  = 0
+    container.Visible          = false
+    container.Parent           = sg
+
+    local corner1 = Instance.new("UICorner")
+    corner1.Parent = container
+
+    local stroke1 = Instance.new("UIStroke")
+    stroke1.Thickness = 3.5
+    stroke1.Color = Color3.fromRGB(0, 0, 0)
+    stroke1.Parent = container
+
+    local inner = Instance.new("Frame")
+    inner.Name             = "InnerFrame"
+    inner.Size             = UDim2.new(1, 0, 0.9132, 0)
+    inner.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    inner.BorderSizePixel  = 0
+    inner.Parent           = container
+
+    local corner2 = Instance.new("UICorner")
+    corner2.Parent = inner
+
+    local grad = Instance.new("UIGradient")
+    grad.Rotation = -90
+    grad.Color = ColorSequence.new{
+        ColorSequenceKeypoint.new(0.000, Color3.fromRGB(255, 120, 0)),
+        ColorSequenceKeypoint.new(1.000, Color3.fromRGB(255, 60, 0))
+    }
+    grad.Parent = inner
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Name                   = "Text"
+    lbl.Size                   = UDim2.new(0.9, 0, 0.82424, 0)
+    lbl.Position               = UDim2.new(0.5, 0, 0.45542, 0)
+    lbl.AnchorPoint            = Vector2.new(0.5, 0.5)
+    lbl.BackgroundTransparency = 1
+    lbl.Text                   = "Go Home"
+    lbl.FontFace               = Font.new("rbxassetid://16658221428", Enum.FontWeight.ExtraBold, Enum.FontStyle.Normal)
+    lbl.TextScaled             = true
+    lbl.TextColor3             = Color3.fromRGB(255, 255, 255)
+    lbl.ZIndex                 = 4
+    lbl.Parent                 = container
+
+    local stroke2 = Instance.new("UIStroke")
+    stroke2.Thickness = 2
+    stroke2.Color = Color3.fromRGB(33, 33, 33)
+    stroke2.Parent = lbl
+
     local btn = Instance.new("TextButton")
-    btn.Name             = "HomeBtn"
-    btn.Size             = UDim2.new(0, 160, 0, 44)
-    btn.AnchorPoint      = Vector2.new(0.5, 1)
-    btn.Position         = UDim2.new(0.5, 0, 1, -20)
-    btn.BackgroundColor3 = Color3.fromHex("#FF4500")
-    btn.TextColor3       = Color3.fromHex("#FFFFFF")
-    btn.Font             = Enum.Font.GothamBold
-    btn.TextSize         = 16
-    btn.Text             = "🏠  Go Home"
-    btn.Visible          = false
-    btn.Parent           = sg
+    btn.Size                   = UDim2.new(1, 0, 1, 0)
+    btn.BackgroundTransparency = 1
+    btn.Text                   = ""
+    btn.ZIndex                 = 9
+    btn.Parent                 = container
 
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius  = UDim.new(0, 10)
-    corner.Parent        = btn
-
-    local stroke = Instance.new("UIStroke")
-    stroke.Color         = Color3.fromHex("#FF8C00")
-    stroke.Thickness     = 2
-    stroke.Parent        = btn
+    btn.MouseEnter:Connect(function()
+        grad.Color = ColorSequence.new{
+            ColorSequenceKeypoint.new(0.000, Color3.fromRGB(255, 140, 20)),
+            ColorSequenceKeypoint.new(1.000, Color3.fromRGB(255, 80, 0))
+        }
+    end)
+    btn.MouseLeave:Connect(function()
+        grad.Color = ColorSequence.new{
+            ColorSequenceKeypoint.new(0.000, Color3.fromRGB(255, 120, 0)),
+            ColorSequenceKeypoint.new(1.000, Color3.fromRGB(255, 60, 0))
+        }
+    end)
 
     btn.MouseButton1Click:Connect(function()
         local center = getIslandCenter()
@@ -1094,16 +1196,15 @@ local function buildHomeGui()
         end
     end)
 
-    -- Poll position and toggle button visibility
     if homeConn then homeConn:Disconnect() end
     homeConn = RunService.Heartbeat:Connect(function()
         local hrp = getHRP()
-        if not hrp then btn.Visible = false; return end
+        if not hrp then container.Visible = false; return end
         local center = getIslandCenter()
-        if center == Vector3.new(0, 0, 0) then btn.Visible = false; return end
+        if center == Vector3.new(0, 0, 0) then container.Visible = false; return end
         local dx = hrp.Position.X - center.X
         local dz = hrp.Position.Z - center.Z
-        btn.Visible = math.sqrt(dx*dx + dz*dz) > HOME_DIST
+        container.Visible = math.sqrt(dx*dx + dz*dz) > HOME_DIST
     end)
 
     return sg
@@ -1254,7 +1355,7 @@ end)
 local Window = WindUI:CreateWindow({
     Title       = "Merge a Nuke Utilities",
     Icon        = "solar:atom-bold",
-    Author      = "by Claude  •  v1.4.5",
+    Author      = "by Claude  •  v1.4.9",
     Folder      = "MergeANukeUtils",
     NewElements = true,
     Topbar      = { Height = 44, ButtonsType = "Mac" },
@@ -1268,7 +1369,7 @@ local Window = WindUI:CreateWindow({
     },
 })
 
-Window:Tag({ Title = "v1.4.5", Icon = "zap", Color = Color3.fromHex("#1a1a2e"), Border = true })
+Window:Tag({ Title = "v1.4.9", Icon = "zap", Color = Color3.fromHex("#1a1a2e"), Border = true })
 
 -- ──────────────────────────────────────────────────────────────
 -- Auto-save helper
@@ -1639,13 +1740,53 @@ end
 
 -- ── Value Tracker Tab ────────────────────────────────────────
 local ValueTrackerTab = MainSection:Tab({
-    Title = "Value Tracker", Icon = "bar-chart-2",
+    Title = "Value Tracker", Icon = "chart-column",
     IconColor = Color3.fromHex("#F59E0B"), Border = true,
 })
 do
     local vtSec = ValueTrackerTab:Section({ Title = "Island Value Tracker", Box = true, BoxBorder = true, Opened = true })
 
-    local vtPara = vtSec:Paragraph({ Title = "Island Values", Desc = "Press Scan to load." })
+    local vtPara = vtSec:Paragraph({ Title = "Island Values", Desc = "Auto-updating..." })
+
+    -- Helper to safely update paragraph description regardless of UI lib version
+    local function setParagraphDesc(para, text)
+        if not para then return end
+        if para.setDesc then pcall(function() para:setDesc(text) end)
+        elseif para.SetDesc then pcall(function() para:SetDesc(text) end)
+        elseif para.Set then pcall(function() para:Set({Desc = text}) end)
+        end
+    end
+
+    local isOverlayEnabled = false
+
+    -- ── Built-in Live value tracker loop ──
+    task.spawn(function()
+        while true do
+            local ok, err = pcall(function()
+                local scan = scanAllIslandValues()
+                
+                local text
+                if #scan == 0 then
+                    text = "No active islands found."
+                else
+                    local lines = {}
+                    for i, entry in ipairs(scan) do
+                        local tag = tostring(entry.userId) == tostring(LocalPlayer.UserId) and " ◀ You" or ""
+                        table.insert(lines, string.format("%d. %s — %s%s", i, entry.name, formatNukeValue(entry.totalValue), tag))
+                    end
+                    text = table.concat(lines, "\n")
+                end
+                
+                setParagraphDesc(vtPara, text)
+                
+                updateValueTrackerBillboards(scan, isOverlayEnabled)
+            end)
+            if not ok then
+                setParagraphDesc(vtPara, "Error: " .. tostring(err))
+            end
+            task.wait(1.5)
+        end
+    end)
 
     vtSec:Space()
 
@@ -1654,39 +1795,14 @@ do
         Desc  = "Displays each player's total nuke value above their island.",
         Value = false, Flag = "valueTrackerOverlay",
         Callback = function(state)
-            if state then
-                showValueTrackerBillboards()
+            isOverlayEnabled = state
+            if not state then
+                updateValueTrackerBillboards({}, false)
             else
-                clearValueTrackerBillboards()
+                task.spawn(function()
+                    pcall(function() updateValueTrackerBillboards(scanAllIslandValues(), true) end)
+                end)
             end
-        end,
-    })
-
-    vtSec:Space()
-
-    vtSec:Button({
-        Title = "Scan Islands", Icon = "refresh-cw", Justify = "Center",
-        Color = Color3.fromHex("#F59E0B"),
-        Callback = function()
-            task.spawn(function()
-                local scan = scanAllIslandValues()
-                if #scan == 0 then
-                    vtPara:setDesc("No islands found. Make sure you're in the game.")
-                    return
-                end
-                local lines = {}
-                for i, entry in ipairs(scan) do
-                    local tag = entry.userId == LocalPlayer.UserId and " ◀ You" or ""
-                    table.insert(lines, string.format("%d. %s — %s%s", i, entry.name, formatNukeValue(entry.totalValue), tag))
-                end
-                vtPara:setDesc(table.concat(lines, "\n"))
-
-                -- Refresh overlays if toggle is on
-                local F = WindUI.Flags
-                if F and F["valueTrackerOverlay"] and F["valueTrackerOverlay"].Value then
-                    showValueTrackerBillboards()
-                end
-            end)
         end,
     })
 end
@@ -2093,8 +2209,8 @@ end
 -- ──────────────────────────────────────────────────────────────
 task.wait(1)
 WindUI:Notify({
-    Title   = "Merge a Nuke  v1.4.5",
-    Content = "Loaded! v1.4.5",
+    Title   = "Merge a Nuke  v1.4.9",
+    Content = "Loaded! v1.4.9",
     Icon    = "solar:atom-bold",
     Duration = 6,
 })
